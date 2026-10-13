@@ -18,6 +18,18 @@
 !patch/master_fx.bin.syms
 !patch/master_fx_v1.bin
 !patch/master_fx_v1.bin.syms
+!braids/
+!braids/build.sh
+!braids/braids_voice.cc
+!braids/braids_voice.h
+!braids/tracker_voice.cc
+!braids/braids_unity.cc
+!braids/shim/
+!braids/shim/*
+!braids/THIRD_PARTY_LICENSE.txt
+!braids/build/
+!braids/build/braids.bin
+!braids/build/braids.bin.syms
 # never, even if re-included above by mistake
 *.ptf
 firmware/

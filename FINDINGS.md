@@ -3,7 +3,9 @@
 Reverse engineering of the original Polyend Tracker's firmware, an emulator for
 its audio engine, and a working patch that adds a software master EQ and a DJ
 filter to the main mix. **Status (2026-10-13): the patch runs on real hardware.**
-Detailed addresses and procedures are in [README.md](README.md).
+It also adds **Mutable Instruments Braids as a real-time synth engine**,
+also running on hardware. Detailed addresses and procedures are in
+[README.md](README.md).
 
 No Polyend code is in this repository. Everything here is analysis, original
 code, and tools that work on a firmware file you supply yourself.
@@ -112,10 +114,57 @@ Unicorn-based Cortex-M4 emulation of the stock image (`tracker_emu.py`):
 | p2: marker at `0xd7000`, no gap | booted, "1.9.2 P2" |
 | **fx: full patch, no gap** | **booted "1.9.2 FX"; DJ filter, pop-up, snap-back and Master EQ work; stock shortcuts unaffected; cold boot clean** |
 
-Still open: confirming that WAV exports include the EQ and DJ filter, and a
-CPU stress test.
+| **br: EQ/DJ + Braids** | **booted "1.9.2 BR"; Braids instruments play; 3 Braids tracks, no audible crackling** |
 
-## 7. Next ideas
+Still open: confirming that WAV exports include the EQ and DJ filter; a CPU
+stress test with 4 expensive Braids tracks.
+
+## 7. Braids synth engine (`braids/`)
+
+The Braids macro oscillator (MIT licence, Emilie Gillet) is compiled for the
+K66 from an unmodified upstream checkout and runs in real time as a Tracker
+instrument. It's not sample playback: the instrument's sample is never read.
+
+- **Player:** each track has one sample player (vtable `0xa9fb0`, update
+  `0xd074c`, at voice+0x120, voices at `0x1fffb800` + t×`0x660`), so tracks
+  are monophonic. The chain after it is amp envelope (inside the player) →
+  bit reducer → filter (feeds the reverb and delay sends) → gain → volume/pan
+  → dry mixers.
+- **Hooks:**
+  - `0xd0758` (playMode read in render) → `braids_render_stub` fills the
+    player's block and rejoins at `0xd0776`, so the envelope and everything
+    after it still apply.
+  - `0xd0a50` (after the mode-specific note-on) → `braids_note_stub` picks
+    the model and retriggers.
+  - Boot: `0xf3fa` → `braids_boot` (copies `.data`, zeroes `.bss`) →
+    `patch_boot` → engine init.
+- **Use:**
+  - Name an instrument `BR-<model>`, by name or number 0–47. The on-device
+    keyboard has no `:`; `BR:` also works.
+  - Put it in Granular mode.
+  - Pitch comes from player +0x74, so tune, finetune, glide and pitch FX
+    all apply.
+  - **Timbre** is Granular Position (with its envelope, LFO and the `p` step
+    FX). **Color** is grain length (log scale).
+  - Up to 4 Braids tracks; a 5th plays its sample.
+- **Output rate is 44,117.647 Hz** (Teensy audio rate; the player increment
+  is 0.9996 at C4). Braids renders directly at that rate with a pitch offset,
+  so tuning is exact, but its 96 kHz-based decay times run about 2.2× long.
+- **Measured in the emulator:**
+  - 110 KB of flash at `0xD9000`, plus 17 KB of SDRAM per voice.
+  - Tuning through the full chain is within ±0.1 cents.
+  - 2.8k–31k instructions per block per model (median 13k).
+  - Pattern 1 with 2 Braids tracks: 199k instructions per block, against
+    180k stock.
+  - Output is bit-identical to stock when no instrument is `BR-`.
+- **Tools:** `patch/link.py` gained RAM `.data`/`.bss` support and
+  `tracker_emu.call` gained stack arguments. `make_ptf.py --hooks ...,braids`
+  builds the file; `m13`–`m15` test it.
+- **Hardware (2026-10-13):** `PolyendTracker_br.ptf` boots and shows
+  "1.9.2 BR". Braids instruments play, and 3 Braids tracks at once showed
+  no audible crackling.
+
+## 8. Next ideas
 
 - **Momentary performance effects on Master + pads:** beat repeat, tape stop,
   bitcrush and filter sweeps.
@@ -124,3 +173,5 @@ CPU stress test.
 - A bus compressor, which would need somewhere to save its settings in the
   project file.
 - Song mode in the harness; checking renders against device exports.
+- Braids: 44.1 kHz tables, so decays match the module; template `BR-` `.pti`
+  files (needs the `.pti` CRC); a real-cycle cost measurement.

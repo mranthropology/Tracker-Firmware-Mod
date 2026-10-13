@@ -110,6 +110,10 @@ UI_BUTTON = 0x0002_8F0C            # interface button handler (iface, btn, state
 UI_HOOK_SITES = {0xF628: (UI_KNOB, "ui_knob"), 0xF636: (UI_BUTTON, "ui_button"),
                  0xF646: (UI_BUTTON, "ui_button")}
 BOOT_HOOK_SITE = 0x0000_F3FA       # app setup's only call: 'bl 0x1611c' (engine init)
+# Braids voice (braids/build/braids.bin, see braids/build.sh)
+BRAIDS_BIN = Path(__file__).parent / "braids" / "build" / "braids.bin"
+BRAIDS_HOOKS = {0xD0758: ("90f82130", "braids_render_stub"),   # ldrb.w r3,[r0,#0x21]
+                0xD0A50: ("94f82c30", "braids_note_stub")}     # ldrb.w r3,[r4,#0x2c]
 UI_POPUP = 0x0002_A71C             # popup(popups 0x20005ec4, unused, text, seconds)
 BTN_MASTER = 12                    # Master screen registers its press/release handler here
 BTN_SHIFT = 29                     # handled by every screen; knob acceleration reads it
@@ -256,10 +260,19 @@ class TrackerEmu:
     # ---------- execution ----------
     def call(self, func: int, *args: int, max_insns: int = 50_000_000,
              s0: float | None = None) -> int:
-        """Call a Thumb function with up to 4 integer args (+ optional float s0); return r0."""
+        """Call a Thumb function with integer args (+ optional float s0); return r0.
+
+        Args 5+ go on the stack (AAPCS), 8-byte aligned; SP is restored after.
+        """
         regs = (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3)
         for reg, val in zip(regs, args):
             self.uc.reg_write(reg, val & 0xFFFFFFFF)
+        saved_sp = self.uc.reg_read(UC_ARM_REG_SP)
+        if len(args) > 4:
+            sp = (saved_sp - 4 * (len(args) - 4)) & ~7
+            for i, val in enumerate(args[4:]):
+                self.w32(sp + 4 * i, val & 0xFFFFFFFF)
+            self.uc.reg_write(UC_ARM_REG_SP, sp)
         if s0 is not None:
             self.uc.reg_write(UC_ARM_REG_S0, struct.unpack("<I", struct.pack("<f", s0))[0])
         self.uc.reg_write(UC_ARM_REG_LR, RETURN_MAGIC)
@@ -273,6 +286,7 @@ class TrackerEmu:
             pc = self.uc.reg_read(UC_ARM_REG_PC)
             raise RuntimeError(
                 f"did not return after {self.stats.insns - start} insns (pc={pc:#x})")
+        self.uc.reg_write(UC_ARM_REG_SP, saved_sp)
         return self.uc.reg_read(UC_ARM_REG_R0)
 
     def reset_runtime(self) -> None:
@@ -468,6 +482,29 @@ class TrackerEmu:
             self.uc.mem_write(BOOT_HOOK_SITE, thumb_branch(BOOT_HOOK_SITE, self._boot_entry & ~1, link=True))
         self.set_patch_params(dj=0.0)
         return {"bytes": len(binary), "entry": entry}
+
+    def apply_braids_patch(self) -> dict:
+        """Install braids.bin and its player hooks; boot then goes through braids_boot.
+
+        Apply after apply_master_fx_patch() (braids_boot chains to patch_boot)
+        and before init_engine().
+        """
+        from patch.link import thumb_branch
+        syms = {k: int(v, 16) for k, v in (l.split() for l in
+                BRAIDS_BIN.with_suffix(".bin.syms").read_text().splitlines())}
+        base = syms["braids_voice_size"] & ~0xFFF
+        self.uc.mem_write(base, BRAIDS_BIN.read_bytes())
+        for site, (stock, name) in BRAIDS_HOOKS.items():
+            if bytes(self.uc.mem_read(site, 4)).hex() != stock:
+                raise RuntimeError(f"unexpected bytes at Braids hook {site:#x}")
+            self.uc.mem_write(site, thumb_branch(site, syms[name] & ~1, link=False))
+        expected = thumb_branch(BOOT_HOOK_SITE, getattr(self, "_boot_entry", 0) & ~1, link=True)
+        if bytes(self.uc.mem_read(BOOT_HOOK_SITE, 4)) != expected:
+            raise RuntimeError("apply_master_fx_patch() first (boot hook must call patch_boot)")
+        self.uc.mem_write(BOOT_HOOK_SITE, thumb_branch(BOOT_HOOK_SITE, syms["braids_boot"] & ~1, link=True))
+        self._boot_entry = syms["braids_boot"]
+        self.braids_syms = syms
+        return syms
 
     def record_ui_passthrough(self) -> list:
         """Replace the interface's knob/button handlers with recorders.

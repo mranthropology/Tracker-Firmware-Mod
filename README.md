@@ -42,6 +42,9 @@ Song tests (m5–m7, m9–m12) expect a Tracker project copied to `projects/<nam
 | `m8_patch_test.py` | Master EQ + DJ filter patch, v1 vs v2: response, cost, click/zipper level, bit-exact bypass |
 | `m9_dj_demo.py [dir] [n]` | Renders a pattern through the patched firmware with an automated DJ sweep → `out/*_djsweep.wav` |
 | `m12_ptf_verify.py [ptf] [--no-render]` | Checks the built `.ptf`: every byte it writes equals the harness-tested image; then boots the decoded image as-is (state filled with junk) and renders the gesture, which must be bit-identical to the harness-patched render |
+| `m13_braids_cost.py` | Braids (Mutable Instruments, MIT) compiled for the K66: cost per model, tuning, `out/braids_models.wav` |
+| `m14_braids_voice.py [--quick]` | Braids as a Tracker instrument through the player hooks: tuning through the full chain, model from name, 4-track limit, cost, song render `out/*_braids.wav` |
+| `m15_braids_ptf_verify.py [ptf]` | Checks a `.ptf` with Braids: one gap-free block; every byte equals the tested image; the decoded image booted as-is (garbage SDRAM) renders bit-identical to the harness-patched render |
 | `m11_sdram_audit.py` | Watches every SDRAM access above the firmware's top object (`0x70ef8874`–`0x71000000`) over boot, load and playback; the patch state must be the only thing used there |
 | `m10_dj_control.py [--demo]` | DJ on Shift + Master + jog wheel with snap-back: input routing, audio, clicks; `--demo` plays the gesture over pattern 1 → `out/*_djcontrol.wav` |
 
@@ -223,6 +226,57 @@ Song tests (m5–m7, m9–m12) expect a Tracker project copied to `projects/<nam
   - **Personal use only.** This contains Polyend's firmware: don't redistribute it.
 - **Open on hardware:** WAV export check; CPU stress test (busy project, all
   EQ bands off flat, DJ filter on).
+
+### Braids instrument (`braids/`)
+
+- Build: `braids/build.sh <dir with eurorack/ and stmlib/>` compiles an unmodified
+  pichenettes/eurorack + stmlib checkout (MIT, Emilie Gillet) as one unit
+  (`braids_unity.cc`; shim headers in `braids/shim/`). It links at `0xD9000`
+  (110 KB). Writable data goes to SDRAM `0x70FE1000`, with its starting
+  values stored in flash; `patch/link.py` now supports this. The build is
+  two-pass, so `braids_boot` knows where the data lands.
+- **Player hooks** (one sample player per track, vtable `0xa9fb0`, so each
+  track is monophonic):
+  - `0xd0758` (`ldrb r3,[r0,#0x21]` in render `0xd074c`) → `braids_render_stub`:
+    for a Braids track it fills a block (allocate `0xce42c`, data at +4) and
+    rejoins at `0xd0776`, so the envelope, bit reducer, filter, sends,
+    volume and pan still apply.
+  - `0xd0a50` (after the mode-specific note-on in `0xd0a28`) →
+    `braids_note_stub`: picks the model and retriggers.
+  - Boot: `0xf3fa` → `braids_boot` (copies `.data`, zeroes `.bss`) →
+    `patch_boot` → engine init.
+- **Use:** name an instrument `BR-<model>` or `BR:<model>`. The model is a
+  name or a number 0–47; case, spaces, `_` and `-` are ignored, and an
+  unknown name gives CSAW. The Tracker's on-screen keyboard has no `:` (keys:
+  digits, letters, `- + @` space and `!"#$%&'()`), so type `BR-` on the device. Set its
+  playback mode to Granular. Controls:
+  - **Pitch** from player +0x74 (0.9996 × 2^((n−60)/12) at a 44,117.647 Hz output
+    rate), so tune, finetune, glide and pitch FX all apply.
+  - **Timbre** = Granular Position (player +0x9e, with its envelope, LFO and
+    step FX). In other modes it uses the instrument's static position, +0x16c.
+  - **Color** = grain length (+0x16a, 44–44,100 samples, log scale).
+  - Braids output is −6 dB.
+- **Voices:** up to 4 tracks at once. A track without a free slot plays its
+  sample, and the slot frees when the envelope ends. The preview player is
+  always allowed. Voice memory is 17 KB each at `0x70F00000` + slot × `0x4400`.
+- **Measured** (`m13`, `m14`):
+  - Tuning through the full chain is within ±0.1 cents (65 Hz–2 kHz).
+  - Cost per model is 2.8k–31k instructions per block (median 13k).
+  - One playing voice adds +21.4k (CSAW) or +16.9k (FM) per block, against
+    +16.4k for a stock Granular sample voice.
+  - Pattern 1 with 2 Braids tracks: mean 199k instructions per block,
+    against 180k stock.
+  - With the patch installed but no `BR:` instruments, output is
+    bit-identical to stock.
+- **Firmware file:** `make_ptf.py ... --hooks boot,audio,ui,codec,braids [--marker BR]`.
+  It refuses a `braids.bin` built against a different `master_fx.bin`
+  (`__next_boot` in its syms). The output is one gap-free block, `0x0`–`0xf3fb4`.
+  `m15_braids_ptf_verify.py` passes.
+- **Hardware (2026-10-13):** `PolyendTracker_br.ptf` boots ("1.9.2 BR"),
+  Braids instruments play, and 3 Braids tracks show no audible crackling.
+- **Not done yet:** template `.pti` files (needs the `.pti` CRC); 44.1 kHz
+  versions of Braids' tables (decay times currently run about 2.2× long);
+  a hardware test, including the real-cycle cost.
 
 ### Playback
 

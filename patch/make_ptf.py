@@ -1,8 +1,11 @@
 """Build a patched Tracker .ptf (Intel HEX) from the stock 1.9.2 .ptf.
 
 Usage: python3 -m patch.make_ptf <stock .ptf> <out .ptf> [--hooks LIST] [--marker TEXT]
-  --hooks   comma list of: boot, audio, ui, codec (default: all). "none" =
-            no patch code at all (marker only).
+  --hooks   comma list of: boot, audio, ui, codec, braids (default: all but
+            braids). "none" = no patch code at all (marker only). braids adds
+            braids/build/braids.bin at its link address (0xD9000) and the
+            player hooks 0xd0758/0xd0a50; startup then goes through
+            braids_boot, which chains to patch_boot (so it needs boot).
   --marker  version suffix shown in Config (e.g. "T1"): the version format
             strings move into the appended region, so the text appears only
             if the updater really programmed that region.
@@ -115,14 +118,31 @@ def write_hex(stock_text: str, image: bytes, extra: tuple[int, int] | None = Non
 
 VERSION_FORMATS = {0x2887C: (0xA2B6C, b"%d.%d.%d beta %d"),   # literal pool -> format
                    0x288A0: (0xA2B60, b"%d.%d.%d")}           # (startup 0x2878c)
-ALL_HOOKS = ("boot", "audio", "ui", "codec")
+ALL_HOOKS = ("boot", "audio", "ui", "codec", "braids")
+DEFAULT_HOOKS = ("boot", "audio", "ui", "codec")
+BRAIDS_BIN = PATCH_DIR.parent / "braids" / "build" / "braids.bin"
+BRAIDS_HOOKS = {0xD0758: ("90f82130", "braids_render_stub"),   # ldrb.w r3,[r0,#0x21]
+                0xD0A50: ("94f82c30", "braids_note_stub")}     # ldrb.w r3,[r4,#0x2c]
 
 
-def patched_image(stock: bytearray, hooks=ALL_HOOKS, marker: str | None = None) -> tuple[bytearray, dict]:
+def patched_image(stock: bytearray, hooks=DEFAULT_HOOKS, marker: str | None = None) -> tuple[bytearray, dict]:
     import struct
     binary = (PATCH_DIR / "master_fx.bin").read_bytes() if hooks else b""
     syms = {k: int(v, 16) for k, v in (l.split() for l in
             (PATCH_DIR / "master_fx.bin.syms").read_text().splitlines())}
+    bsyms = None
+    if "braids" in hooks:
+        if "boot" not in hooks:
+            raise RuntimeError("braids needs boot (braids_boot chains to patch_boot)")
+        bsyms = {k: int(v, 16) for k, v in (l.split() for l in
+                 BRAIDS_BIN.with_suffix(".bin.syms").read_text().splitlines())}
+        bbase = bsyms["braids_voice_size"] & ~0xFFF
+        if bbase < PATCH_BASE + len(binary):
+            raise RuntimeError("braids.bin overlaps master_fx.bin")
+        # braids_boot must chain to this master_fx build's patch_boot
+        if bsyms.get("__next_boot") != syms["patch_boot"]:
+            raise RuntimeError("braids.bin was built against a different master_fx.bin; rerun braids/build.sh")
+        binary = binary + b"\xff" * (bbase - PATCH_BASE - len(binary)) + BRAIDS_BIN.read_bytes()
     if marker:
         binary += b"\0" * (-len(binary) % 4)
         marker_at = {}
@@ -144,6 +164,13 @@ def patched_image(stock: bytearray, hooks=ALL_HOOKS, marker: str | None = None) 
         ("ui", 0x0F646, 0x28F0C, False, syms["ui_button"]),
     ]
     sites = [site[1:] for site in sites if site[0] in hooks]
+    if bsyms:
+        sites = [(a, old, link, bsyms["braids_boot"] if a == 0x0F3FA else new)
+                 for a, old, link, new in sites]
+        for addr, (stock_hex, name) in BRAIDS_HOOKS.items():
+            if bytes(image[addr:addr + 4]).hex() != stock_hex:
+                raise RuntimeError(f"unexpected stock bytes at {addr:#x}")
+            image[addr:addr + 4] = thumb_branch(addr, bsyms[name] & ~1, False)
     for addr, old, link, new in sites:
         if bytes(image[addr:addr + 4]) != thumb_branch(addr, old, link):
             raise RuntimeError(f"unexpected stock bytes at {addr:#x}")
@@ -167,7 +194,7 @@ def main() -> None:
     opts = {k: args[i + 1] for i, k in enumerate(args) if k.startswith("--")}
     stock_path, out_path = (Path(a) for a in [a for a in args if not a.startswith("--")
                                               and a not in opts.values()][:2])
-    hooks = ALL_HOOKS if "--hooks" not in opts else (
+    hooks = DEFAULT_HOOKS if "--hooks" not in opts else (
         () if opts["--hooks"] == "none" else tuple(opts["--hooks"].split(",")))
     if set(hooks) - set(ALL_HOOKS):
         raise SystemExit(f"unknown hooks: {set(hooks) - set(ALL_HOOKS)}")

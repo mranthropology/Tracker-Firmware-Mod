@@ -1,0 +1,9 @@
+// Minimal <algorithm> for the freestanding Braids build (only what Braids uses).
+#pragma once
+namespace std {
+template <class T> inline const T& min(const T& a, const T& b) { return b < a ? b : a; }
+template <class T> inline const T& max(const T& a, const T& b) { return a < b ? b : a; }
+template <class It, class T> inline void fill(It first, It last, const T& v) {
+  for (; first != last; ++first) *first = v;
+}
+}
