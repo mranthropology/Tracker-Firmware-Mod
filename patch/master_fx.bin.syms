@@ -1,0 +1,10 @@
+bell_ramp 0x000d817d
+bell_steady 0x000d7f79
+design_dj 0x000d7d11
+dj_ramp 0x000d848d
+dj_steady 0x000d8309
+master_fx 0x000d7001
+master_fx_entry 0x000d7a61
+patch_boot 0x000d7a25
+ui_button 0x000d7a69
+ui_knob 0x000d7b35

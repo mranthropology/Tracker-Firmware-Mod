@@ -1,0 +1,28 @@
+# Allow-list: everything is ignored unless listed below. This keeps Polyend's
+# firmware (firmware/*.bin, any .ptf), personal projects and renders out of git.
+*
+!.gitignore
+!README.md
+!FINDINGS.md
+!tracker_emu.py
+!m[0-9]*.py
+!patch/
+!patch/__init__.py
+!patch/build.sh
+!patch/link.py
+!patch/make_ptf.py
+!patch/make_probes.py
+!patch/master_fx.c
+!patch/master_fx_v1.c
+!patch/master_fx.bin
+!patch/master_fx.bin.syms
+!patch/master_fx_v1.bin
+!patch/master_fx_v1.bin.syms
+# never, even if re-included above by mistake
+*.ptf
+firmware/
+projects/
+out/
+.venv/
+__pycache__/
+*.o

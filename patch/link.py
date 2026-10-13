@@ -1,0 +1,123 @@
+"""Minimal static linker for one Cortex-M4 ELF object -> raw image at a fixed address.
+
+Lays out .text then .rodata*, resolves R_ARM_ABS32, R_ARM_THM_CALL,
+R_ARM_THM_JUMP24 and MOVW/MOVT relocations. Refuses .data/.bss and undefined
+symbols (the patch must be self-contained). Usage:
+    link.py <object.o> <base_hex> <out.bin>   -> also writes <out.bin>.syms
+"""
+from __future__ import annotations
+
+import struct
+import sys
+from pathlib import Path
+
+R_ARM_ABS32, R_ARM_THM_CALL, R_ARM_THM_JUMP24 = 2, 10, 30
+R_ARM_THM_MOVW_ABS_NC, R_ARM_THM_MOVT_ABS = 47, 48
+
+
+def parse(path: Path):
+    d = path.read_bytes()
+    shoff, = struct.unpack_from("<I", d, 0x20)
+    shentsize, shnum, shstrndx = struct.unpack_from("<HHH", d, 0x2E)
+    secs = []
+    for i in range(shnum):
+        name, typ, flags, addr, off, size, link, info, align, entsize = \
+            struct.unpack_from("<10I", d, shoff + i * shentsize)
+        secs.append(dict(name=name, type=typ, flags=flags, off=off, size=size,
+                         link=link, info=info, align=max(align, 1), entsize=entsize))
+    names = secs[shstrndx]
+    for s in secs:
+        end = d.index(b"\0", names["off"] + s["name"])
+        s["name"] = d[names["off"] + s["name"]:end].decode()
+    return d, secs
+
+
+def symbols(d, secs):
+    symtab = next(s for s in secs if s["type"] == 2)
+    strtab = secs[symtab["link"]]
+    out = []
+    for i in range(symtab["size"] // 16):
+        name, value, size, info, other, shndx = struct.unpack_from(
+            "<IIIBBH", d, symtab["off"] + 16 * i)
+        end = d.index(b"\0", strtab["off"] + name)
+        out.append(dict(name=d[strtab["off"] + name:end].decode(), value=value,
+                        shndx=shndx, type=info & 0xF))
+    return out
+
+
+def thumb_branch(addr: int, target: int, link: bool) -> bytes:
+    offset = target - (addr + 4)
+    if not -(1 << 24) <= offset < (1 << 24):
+        raise ValueError("branch out of range")
+    s = (offset >> 24) & 1
+    i1, i2 = (offset >> 23) & 1, (offset >> 22) & 1
+    j1, j2 = (~i1 ^ s) & 1, (~i2 ^ s) & 1
+    hi = 0xF000 | (s << 10) | ((offset >> 12) & 0x3FF)
+    lo = (0xD000 if link else 0x9000) | (j1 << 13) | (j2 << 11) | ((offset >> 1) & 0x7FF)
+    return struct.pack("<HH", hi, lo)
+
+
+def thumb_movw_movt(insn: bytes, value: int) -> bytes:
+    hi, lo = struct.unpack("<HH", insn)
+    imm16 = value & 0xFFFF
+    hi = (hi & 0xFBF0) | ((imm16 >> 12) & 0xF) | (((imm16 >> 11) & 1) << 10)
+    lo = (lo & 0x8F00) | (((imm16 >> 8) & 7) << 12) | (imm16 & 0xFF)
+    return struct.pack("<HH", hi, lo)
+
+
+def link(obj: Path, base: int):
+    d, secs = parse(obj)
+    for s in secs:
+        if s["flags"] & 2 and s["size"] and s["name"].startswith((".data", ".bss")):
+            raise SystemExit(f"patch must not use {s['name']} (use the fixed state address)")
+    layout, image, addr = {}, bytearray(), base
+    alloc = [i for i, s in enumerate(secs) if s["flags"] & 2 and s["size"]
+             and (s["name"].startswith(".text") or s["name"].startswith(".rodata"))]
+    alloc.sort(key=lambda i: not secs[i]["name"].startswith(".text"))
+    for i in alloc:
+        s = secs[i]
+        while (addr - base) % s["align"]:
+            image.append(0)
+            addr += 1
+        layout[i] = addr
+        image += d[s["off"]:s["off"] + s["size"]]
+        addr += s["size"]
+    syms = symbols(d, secs)
+
+    def sym_addr(sym):
+        if sym["shndx"] == 0:
+            raise SystemExit(f"undefined symbol {sym['name']!r} (patch must be self-contained)")
+        return layout[sym["shndx"]] + sym["value"]
+
+    for rel in (s for s in secs if s["type"] == 9 and s["info"] in layout):
+        target_base = layout[rel["info"]]
+        for k in range(rel["size"] // 8):
+            r_off, r_info = struct.unpack_from("<II", d, rel["off"] + 8 * k)
+            rtype, sym = r_info & 0xFF, syms[r_info >> 8]
+            place = target_base + r_off
+            pos = place - base
+            S = sym_addr(sym) | (1 if sym["type"] == 2 else 0)   # STT_FUNC -> Thumb bit
+            if rtype == R_ARM_ABS32:
+                A, = struct.unpack_from("<I", image, pos)
+                struct.pack_into("<I", image, pos, (S + A) & 0xFFFFFFFF)
+            elif rtype in (R_ARM_THM_CALL, R_ARM_THM_JUMP24):
+                image[pos:pos + 4] = thumb_branch(place, S & ~1, rtype == R_ARM_THM_CALL)
+            elif rtype == R_ARM_THM_MOVW_ABS_NC:
+                image[pos:pos + 4] = thumb_movw_movt(bytes(image[pos:pos + 4]), S)
+            elif rtype == R_ARM_THM_MOVT_ABS:
+                image[pos:pos + 4] = thumb_movw_movt(bytes(image[pos:pos + 4]), S >> 16)
+            else:
+                raise SystemExit(f"unsupported relocation type {rtype} at {place:#x}")
+    exports = {s["name"]: sym_addr(s) for s in syms
+               if s["type"] == 2 and s["shndx"] in layout}
+    return bytes(image), exports
+
+
+if __name__ == "__main__":
+    obj, base, out = Path(sys.argv[1]), int(sys.argv[2], 16), Path(sys.argv[3])
+    image, exports = link(obj, base)
+    out.write_bytes(image)
+    out.with_suffix(out.suffix + ".syms").write_text(
+        "".join(f"{name} {addr:#010x}\n" for name, addr in sorted(exports.items())))
+    print(f"{out.name}: {len(image)} bytes at {base:#x}; " +
+          ", ".join(f"{n}={a:#x}" for n, a in sorted(exports.items())))
