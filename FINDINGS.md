@@ -114,6 +114,7 @@ Unicorn-based Cortex-M4 emulation of the stock image (`tracker_emu.py`):
 | p2: marker at `0xd7000`, no gap | booted, "1.9.2 P2" |
 | **fx: full patch, no gap** | **booted "1.9.2 FX"; DJ filter, pop-up, snap-back and Master EQ work; stock shortcuts unaffected; cold boot clean** |
 
+| **br2: + 96 kHz bell/drum/snare/particle, 48 templates** | **booted "1.9.2 BR2"; "Braids Templates" project loads** |
 | **br: EQ/DJ + Braids** | **booted "1.9.2 BR"; Braids instruments play; 3 Braids tracks, no audible crackling** |
 
 Still open: confirming that WAV exports include the EQ and DJ filter; a CPU

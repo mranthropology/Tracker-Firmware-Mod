@@ -31,7 +31,8 @@ const uint32_t kInstruments = 0x200001CC;  // 48 x 0x174
 const uint32_t kInstrumentSize = 0x174;
 const uint32_t kAllocate = 0x000CE42D;     // audio block allocate (Thumb)
 const uint32_t kVoiceMemory = 0x70F00000;  // free SDRAM (fw ends 0x70ef8874)
-const uint32_t kVoiceStride = 0x4400;      // >= sizeof(MacroOscillator)
+const uint32_t kVoiceStride = 0x4400;      // oscillator + resampler state
+static_assert(kVoiceStride >= kVoiceFootprint, "voice slot too small");
 const int kSlots = 9;                      // 8 tracks + preview
 const int kMaxTracks = 4;
 const float kIncrementAtC4 = 0.9996f;      // player increment for note 60
@@ -129,6 +130,13 @@ int16_t color_from_grain_length(uint16_t samples) {
 
 void release(Slot& s) { s.licensed = 0; }
 
+// Models whose decays are per-sample constants run at Braids' native 96 kHz
+// and are resampled (m16_braids_rate.py: struck bell/drum 2.15x, snare 1.4x,
+// particle noise 1.5x too long when rendered directly at 44.1 kHz).
+bool renders_at_96k(int model) {
+  return model == 32 || model == 33 || model == 36 || model == 45;
+}
+
 int licensed_tracks() {
   int n = 0;
   for (int i = 0; i < 8; ++i) n += slots[i].licensed;
@@ -200,7 +208,10 @@ uint32_t braids_render(uint32_t player) {
     braids_voice_strike(mem);
     s.strike = 0;
   }
-  braids_voice_render(mem, s.model, pitch, timbre, color, out, 128);
+  if (renders_at_96k(s.model))
+    braids_voice_render_96k(mem, s.model, pitch, timbre, color, out, 128);
+  else
+    braids_voice_render(mem, s.model, pitch, timbre, color, out, 128);
   for (int i = 0; i < 128; ++i) out[i] = static_cast<int16_t>(out[i] >> 1);   // -6 dB
   return block;
 }

@@ -45,6 +45,8 @@ Song tests (m5–m7, m9–m12) expect a Tracker project copied to `projects/<nam
 | `m13_braids_cost.py` | Braids (Mutable Instruments, MIT) compiled for the K66: cost per model, tuning, `out/braids_models.wav` |
 | `m14_braids_voice.py [--quick]` | Braids as a Tracker instrument through the player hooks: tuning through the full chain, model from name, 4-track limit, cost, song render `out/*_braids.wav` |
 | `m15_braids_ptf_verify.py [ptf]` | Checks a `.ptf` with Braids: one gap-free block; every byte equals the tested image; the decoded image booted as-is (garbage SDRAM) renders bit-identical to the harness-patched render |
+| `m16_braids_rate.py [--check]` | Which Braids models depend on the sample rate beyond pitch (decay times at 44.1 kHz vs native 96 kHz); `--check` verifies the resampled 96 kHz path (decays, tuning, cost) |
+| `m17_braids_templates.py [dir]` | Checks the 48 `BR-` template instruments: CRC, frame count, header, name/mode, and that each plays as its model through the patched firmware |
 | `m11_sdram_audit.py` | Watches every SDRAM access above the firmware's top object (`0x70ef8874`–`0x71000000`) over boot, load and playback; the patch state must be the only thing used there |
 | `m10_dj_control.py [--demo]` | DJ on Shift + Master + jog wheel with snap-back: input routing, audio, clicks; `--demo` plays the gesture over pattern 1 → `out/*_djcontrol.wav` |
 
@@ -274,9 +276,47 @@ Song tests (m5–m7, m9–m12) expect a Tracker project copied to `projects/<nam
   `m15_braids_ptf_verify.py` passes.
 - **Hardware (2026-10-13):** `PolyendTracker_br.ptf` boots ("1.9.2 BR"),
   Braids instruments play, and 3 Braids tracks show no audible crackling.
-- **Not done yet:** template `.pti` files (needs the `.pti` CRC); 44.1 kHz
-  versions of Braids' tables (decay times currently run about 2.2× long);
-  a hardware test, including the real-cycle cost.
+- **Sample rate.** Rendering directly at 44.1 kHz with the pitch offset puts
+  every pitch-indexed table on the right frequency, including oscillator
+  increments and filter cutoffs. Only per-sample time constants run long.
+  `m16_braids_rate.py` found four affected models: struck bell and drum
+  (2.15×), snare (1.4×) and particle noise.
+  - Those four run at Braids' native 96 kHz, unmodified, and are resampled
+    to 44,117.647 Hz: `braids_voice_render_96k`, 272/125 polyphase, 125 phases
+    × 32 taps, Kaiser β 7, cutoff 20 kHz, using SMLAD
+    (`braids/gen_resampler.py` → `resample_taps.h`).
+  - Results: bell and snare decays now match the module exactly; drum is
+    within about 10–15% (it has random noise excitation); tuning through the
+    resampler is exact.
+  - Cost per block: about 42–45k instructions for bell, drum and snare
+    (was about 15k); 26k for particle noise.
+  - Braids' percussion models render in pairs and overrun on odd sizes, as
+    the module always renders 24. The 96 kHz path only asks for even counts
+    and carries a spare sample to the next block.
+  - Unaligned word loads in the filter are safe: the firmware never sets
+    `CCR.UNALIGN_TRP`. Its only SCB write, at `0x68ac`, enables the DWT cycle
+    counter, which is useful for measuring real cycles on hardware later.
+- **Templates** (`braids/make_templates.py` → `out/braids_templates/instruments/`):
+  48 instruments, `1 BR-CSAW.pti` … `48 BR-QUESTION MARK.pti`, built as follows:
+  - **Settings:** the firmware's own defaults (`0x225dc` run in the
+    emulator), plus Granular mode, Timbre and Color at mid.
+  - **Sample:** a 1 s recording of each model at C4, so the instrument still
+    plays something representative on stock firmware.
+  - **File format:**
+    - CRC-32 (zlib) of bytes 0–`0x183` at `0x184`; verified against all 16
+      real project files.
+    - File `N` is slot N−1 (`0x716f6`).
+    - The 16-byte header is copied from a real file. Its last two bytes vary
+      between real files (`00 00`, `06 00`, `ff ff`) and their meaning is unknown.
+  - **Delivery:** the Tracker has no cross-project instrument import, so the
+    templates ship as a project folder, `Projects/<name>/instruments`, plus a
+    blank `project.mt`.
+- **Hardware (2026-10-13):** `PolyendTracker_br2.ptf` boots ("1.9.2 BR2"),
+  and the "Braids Templates" project loads on the device. It was built from
+  `New Project`'s `project.mt` and its factory demo pattern, plus the 48
+  templates.
+- **Not done yet:** listening checks for the 96 kHz models on hardware; a
+  4-track stress test with bell, drum or snare; a real-cycle cost measurement.
 
 ### Playback
 

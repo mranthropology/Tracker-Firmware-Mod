@@ -27,6 +27,10 @@
 !braids/shim/
 !braids/shim/*
 !braids/THIRD_PARTY_LICENSE.txt
+!braids/__init__.py
+!braids/gen_resampler.py
+!braids/resample_taps.h
+!braids/make_templates.py
 !braids/build/
 !braids/build/braids.bin
 !braids/build/braids.bin.syms
