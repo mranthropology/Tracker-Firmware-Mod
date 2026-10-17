@@ -117,15 +117,15 @@ enum { L_PRE, L_AP1, L_AP2, L_AP3, L_AP4, L_LMOD, L_LD1, L_LAP, L_LD2,
 #define FX_STATE        0x70F20000u             /* free SDRAM (see README) */
 #define FX_MAGIC        0x4B4E4246u             /* 'FBNK' */
 #define PLATE_MEM       ((int16_t *)(FX_STATE + 0x1000))
-/* Internal SRAM for the short lines (input all-passes, modulated all-passes):
- * 10 KB from the firmware's heap, allocated once by patch_boot (master_fx.c)
+/* Internal SRAM for the short lines (input, modulated and tank all-passes):
+ * 26 KB from the firmware's heap, allocated once by patch_boot (master_fx.c)
  * and stored at patch state +28. SDRAM is used if it is 0.
  * Idea credit: OpenTracker (https://github.com/sandlbn/polyend-tracker-re, MIT) keeps its
  * stock-style reverb's input all-passes in an SRAM ring and documents the
  * Tracker's SDRAM as 16-bit. No code was taken from it; the allocation and
  * line layout here are this project's own. */
 #define FX_SRAM         (*(int16_t *volatile *)(PATCH_STATE + 28))
-#define SRAM_SAMPLES    (SZ_AP1 + SZ_AP2 + SZ_AP3 + SZ_AP4 + SZ_LMOD + SZ_RMOD)   /* 5120 */
+#define SRAM_SAMPLES    (SZ_AP1 + SZ_AP2 + SZ_AP3 + SZ_AP4 + SZ_LMOD + SZ_RMOD + SZ_LAP + SZ_RAP)   /* 13312 */
 
 enum { MODE_NONE = 0, MODE_BANK, MODE_STOCK };
 
@@ -162,6 +162,7 @@ typedef struct {
 } fx_state_t;
 
 _Static_assert(sizeof(fx_state_t) <= 0x1000, "state overlaps the plate lines");
+_Static_assert(SRAM_SAMPLES * 2 == 26624, "master_fx.c FX_SRAM_BYTES must match");
 _Static_assert(__builtin_offsetof(fx_state_t, rev) == 4 && __builtin_offsetof(fx_state_t, dly) == 28
                && __builtin_offsetof(fx_state_t, guard) == 52, "master_fx.c reads these offsets");
 
@@ -218,12 +219,13 @@ static inline int16_t to_s16(float x)        /* x in sample units */
     return (int16_t)(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
 }
 
-static inline float soft_sat(float x)        /* tanh, Pade 3/2, |x| <= 3 */
+/* Tape saturation: cubic soft clip, no divide (the Pade tanh cost a VDIV,
+ * 14 cycles, per sample per line). Unity gain at 0, smooth to +/-1 at 1.5. */
+static inline float soft_sat(float x)
 {
-    if (x > 3.0f) return 1.0f;
-    if (x < -3.0f) return -1.0f;
-    float x2 = x * x;
-    return x * (27.0f + x2) / (27.0f + 9.0f * x2);
+    if (x > 1.5f) return 1.0f;
+    if (x < -1.5f) return -1.0f;
+    return x - (4.0f / 27.0f) * x * x * x;
 }
 
 /* ---------- plate building blocks (block-wise, all delays >= BLOCK) ----------
@@ -247,6 +249,8 @@ static int16_t *line(uint32_t off)
         case OFF_AP4:  return sram + SZ_AP1 + SZ_AP2 + SZ_AP3;
         case OFF_LMOD: return sram + SZ_AP1 + SZ_AP2 + SZ_AP3 + SZ_AP4;
         case OFF_RMOD: return sram + SZ_AP1 + SZ_AP2 + SZ_AP3 + SZ_AP4 + SZ_LMOD;
+        case OFF_LAP:  return sram + SZ_AP1 + SZ_AP2 + SZ_AP3 + SZ_AP4 + SZ_LMOD + SZ_RMOD;
+        case OFF_RAP:  return sram + SZ_AP1 + SZ_AP2 + SZ_AP3 + SZ_AP4 + SZ_LMOD + SZ_RMOD + SZ_LAP;
         }
     }
     return PLATE_MEM + off;
@@ -537,13 +541,31 @@ static void reverb_work(fx_state_t *s, void *node)
 #define MAX_SLEW        0.25f                   /* tape speed change, +/-25 % pitch */
 #define MIN_DELAY       4.0f
 
+/* Both neighbours in one 32-bit SDRAM access. The address is often odd-halfword
+ * aligned: Cortex-M4 LDR handles unaligned normal memory (braids_voice.cc's
+ * load_pair relies on the same on hardware); inline asm stops the compiler
+ * splitting it into two LDRSH. */
+static inline uint32_t load_pair_u(const int16_t *p)
+{
+    uint32_t v;
+    __asm__ volatile("ldr %0, [%1]" : "=r"(v) : "r"(p) : "memory");
+    return v;
+}
+
 static inline float read_frac(const int16_t *b, uint32_t w, float d)
 {
     /* sample at time (w - d); w is the next write position */
     float pos = (float)w - d + (float)(LINE_MASK + 1);   /* keep positive */
     uint32_t ip = (uint32_t)pos;
     float f = pos - (float)ip;
-    float x0 = b[ip & LINE_MASK], x1 = b[(ip + 1) & LINE_MASK];
+    ip &= LINE_MASK;
+    float x0, x1;
+    if (ip != LINE_MASK) {
+        uint32_t v = load_pair_u(b + ip);
+        x0 = (float)(int16_t)v; x1 = (float)(int16_t)(v >> 16);
+    } else {
+        x0 = b[LINE_MASK]; x1 = b[0];
+    }
     return x0 + f * (x1 - x0);
 }
 

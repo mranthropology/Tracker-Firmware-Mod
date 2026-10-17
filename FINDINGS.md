@@ -165,13 +165,16 @@ instrument. It's not sample playback: the instrument's sample is never read.
   "1.9.2 BR". Braids instruments play, and 3 Braids tracks at once showed
   no audible crackling.
 
-## 8. Swappable master reverb and delay (`fxbank/`) — work in progress, unstable
+## 8. Swappable master reverb and delay (`fxbank/`) — experimental
 
-> **⚠️ Work in progress, unstable.** On hardware the first build froze the UI
-> and crackled once a reverb or delay send was on. The current code is a
-> diagnostic build (boots on the stock effects, shows real CPU cost, cuts
-> an effect back to stock when it runs too long) and has not been tested on
-> hardware yet. Don't use it for anything you care about.
+> **⚠️ Experimental.** The first build froze the UI and crackled once a reverb
+> or delay send was on. The current build (`bank5`) passed a first hardware
+> test: plate + tape with sends on every instrument, no audible crackle and
+> no clear UI slowdown. Plate + tape costs ~128k cycles a block against
+> stock's ~116k (of ~522k), so headroom is a little lower than stock. Only
+> one project has been tried. It still boots on the stock effects, shows its
+> CPU cost on Shift + Master, and cuts an effect back to stock if it runs too
+> long. Use with care.
 
 
 The stock master reverb and delay can be replaced by other algorithms,
@@ -223,8 +226,20 @@ built-in bank with a plate reverb and a tape delay.
   - `bank3` (int16 plate, 4 taps, readout of the plate's own cost, guard no
     longer changes the selection) is built but not tested on hardware.
   - `bank4` (experimental) adds the plate's short lines in internal SRAM
-    (10 KB from the firmware heap at boot; ~37 % of its memory traffic). Not
-    tested on hardware. The approach follows OpenTracker
+    (10 KB from the firmware heap at boot; ~37 % of its memory traffic). Boots
+    on hardware ("1.9.2 BANK4", 2026-10-17), so the boot-time allocation is
+    fine. With sends on: all stock has no crackle; plate + tape no longer
+    freezes but crackles very slightly and the pattern animation drops frames
+    (audio load near the limit). Project and sample loading work. Readout
+    with plate + tape: `R112 P115 D25 T25k` (stock reverb was ~92k).
+  - `bank5` (experimental): the tank all-passes join the SRAM lines (26 KB
+    from the heap in total), and the tape saturation is a cubic instead of a
+    divide, with both neighbours of each read in one 32-bit access. Boots
+    ("1.9.2 BANK5"). Readout, thousand cycles per block: stock reverb 92,
+    stock delay 24; plate 106 (was 115), tape 22 (was 25). The tape now costs
+    less than the stock delay; plate + tape is ~12k over stock.
+    With plate + tape and sends on every instrument: no audible crackle,
+    no clear UI slowdown (first test, one project). The approach follows OpenTracker
     ([sandlbn/polyend-tracker-re](https://github.com/sandlbn/polyend-tracker-re), MIT), which keeps
     its reverb's input all-passes in SRAM and documents the SDRAM as 16-bit;
     the implementation here is independent.

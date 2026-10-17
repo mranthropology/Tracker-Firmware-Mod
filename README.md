@@ -320,13 +320,16 @@ Song tests (m5–m7, m9–m12) expect a Tracker project copied to `projects/<nam
 - **Not done yet:** listening checks for the 96 kHz models on hardware; a
   4-track stress test with bell, drum or snare; a real-cycle cost measurement.
 
-### Swappable master reverb/delay (`fxbank/`) — work in progress, unstable
+### Swappable master reverb/delay (`fxbank/`) — experimental
 
-> **⚠️ Work in progress, unstable.** On hardware the first build froze the UI
-> and crackled once a reverb or delay send was on. The current code is a
-> diagnostic build (boots on the stock effects, shows real CPU cost, cuts
-> an effect back to stock when it runs too long) and has not been tested on
-> hardware yet. Don't use it for anything you care about.
+> **⚠️ Experimental.** The first build froze the UI and crackled once a reverb
+> or delay send was on. The current build (`bank5`) passed a first hardware
+> test: plate + tape with sends on every instrument, no audible crackle and
+> no clear UI slowdown. Plate + tape costs ~128k cycles a block against
+> stock's ~116k (of ~522k), so headroom is a little lower than stock. Only
+> one project has been tried. It still boots on the stock effects, shows its
+> CPU cost on Shift + Master, and cuts an effect back to stock if it runs too
+> long. Use with care.
 
 
 - **Where the effects live:** each master effect is one AudioStream node,
@@ -370,7 +373,8 @@ Song tests (m5–m7, m9–m12) expect a Tracker project copied to `projects/<nam
     with its `malloc` (`0x9529c`; newlib, sbrk `0xc9a0` allows growth to 8 KB
     below the stack), so nothing else can be given that memory. If the
     allocation fails they stay in SDRAM; the output is bit-identical either way.
-    Experimental, untested on hardware. Credit: the idea of putting the
+    Since bank5 the tank all-passes are in SRAM too (26 KB in total); the plate
+    costs ~106k cycles a block on hardware (stock reverb ~92k). Credit: the idea of putting the
     reverb's short all-pass lines in SRAM, and the note that the Tracker's
     SDRAM bus is 16-bit, come from OpenTracker, the clean-room firmware
     reimplementation at [sandlbn/polyend-tracker-re](https://github.com/sandlbn/polyend-tracker-re)

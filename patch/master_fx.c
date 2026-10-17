@@ -97,7 +97,7 @@
  * the firmware's own heap at boot means nothing else can ever be given it.
  * Only at boot: malloc is not safe from the audio interrupt. */
 #define FW_MALLOC       0x0009529Du
-#define FX_SRAM_BYTES   10240u          /* fx_bank.c: SRAM_SAMPLES * 2 */
+#define FX_SRAM_BYTES   26624u          /* fx_bank.c: SRAM_SAMPLES * 2 */
 typedef void *(*malloc_fn)(uint32_t size);
 
 /* Exported for patch/make_ptf.py: proof that patch_boot clears this address. */

@@ -166,9 +166,9 @@ def reverb_tests():
     emu = boot()
     sram = emu.r32(PATCH_STATE + 28)
     brk = emu.r32(0x1FFF5CA0)                       # newlib heap top (sbrk 0xc9a0)
-    good = 0x200103F4 <= sram and sram + 10240 <= brk
+    good = 0x200103F4 <= sram and sram + 26624 <= brk
     ok &= good
-    print(f"   {'ok ' if good else 'BAD'} plate SRAM block {sram:#x}+10 KB, inside the firmware heap "
+    print(f"   {'ok ' if good else 'BAD'} plate SRAM block {sram:#x}+26 KB, inside the firmware heap "
           f"(0x200103f4..{brk:#x})")
     outs = []
     for use_sram in (True, False):

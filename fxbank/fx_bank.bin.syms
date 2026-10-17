@@ -1,9 +1,9 @@
 allpass 0x000f9c19
 allpass_mod 0x000f9d89
 delay_update 0x000f8a79
-load 0x000fa381
+load 0x000fa3a1
 plate 0x000f8c41
 reverb_update 0x000f8001
 store 0x000fa109
 tap_add 0x000f9f71
-tape 0x000fa5cd
+tape 0x000fa611
