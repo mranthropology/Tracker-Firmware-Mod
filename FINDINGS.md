@@ -165,7 +165,74 @@ instrument. It's not sample playback: the instrument's sample is never read.
   "1.9.2 BR". Braids instruments play, and 3 Braids tracks at once showed
   no audible crackling.
 
-## 8. Next ideas
+## 8. Swappable master reverb and delay (`fxbank/`) — work in progress, unstable
+
+> **⚠️ Work in progress, unstable.** On hardware the first build froze the UI
+> and crackled once a reverb or delay send was on. The current code is a
+> diagnostic build (boots on the stock effects, shows real CPU cost, cuts
+> an effect back to stock when it runs too long) and has not been tested on
+> hardware yet. Don't use it for anything you care about.
+
+
+The stock master reverb and delay can be replaced by other algorithms,
+chosen on the device, like the Korg NTS's effect slots. Version 1 is a
+built-in bank with a plate reverb and a tape delay.
+
+- **Hook:** each effect is one audio node, and the firmware reaches it only
+  through one word in flash (slot 0 of its vtable: `0xa9efc` reverb,
+  `0xa9f54` delay). The patch changes those two words; no code is rewritten.
+  Routing, sends and WAV export are unchanged.
+- **Controls:** the replacements read the stock nodes' parameter fields, so
+  the stock Master Reverb page (Size, Damping, Predelay, Diffusion) and Master
+  Delay page (Time/Sync/Rate, Feedback, PingPong, Filter) drive them.
+- **Selection:** hold Shift + Master and press any other button to step
+  through Plate + Tape (default after boot), Stock rev + Tape, Plate + Stock
+  dly, and all stock. The choice shows in the pop-up and isn't saved.
+- **Plate:** Dattorro's plate (1997), scaled to 44.1 kHz, block-wise in
+  float SDRAM lines. Size sets the decay, Damping the tank low-pass,
+  Diffusion the input diffusers. Level matched to stock.
+- **Tape:** runs on the stock delay's own lines, so switching keeps the
+  echoes. Time changes glide like a tape speed change (no clicks), with wow,
+  flutter, head loss, the stock Filter, and saturation in the loop. The top
+  of the Feedback range self-oscillates, bounded by the saturation.
+- **Emulator results (m18, m19; current int16 plate):**
+
+  | | stock | bank |
+  |---|---|---|
+  | reverb tail level (noise burst) | −37.7 dBFS | −37.5 dBFS |
+  | reverb −30 dB time, Size 0.5 | 1.20 s | 1.32 s (0.74 s at Size 0.1, 3 s+ at 0.9) |
+  | reverb L/R correlation | +0.16 | +0.01 |
+  | reverb cost, noise burst (instructions; hardware cost is dominated by SDRAM waits) | 34.3k insns/block | 56.1k (~600 once idle) |
+  | delay first echo, 1 kHz burst | −15.3 dBFS | −15.4 dBFS |
+  | largest step on a 300 → 150 ms change (220 Hz tone; clean sine ≤ 251) | 353 (click) | 317 (pitch glide) |
+  | delay cost, project pattern 1 | 8.3k | 10.8k |
+
+  All-stock selection is bit-identical to the master FX patch alone. The
+  built `.ptf` matches the tested image byte for byte and, booted with garbage
+  SDRAM, renders bit-identical to the emulator.
+- **Hardware (2026-10-14):**
+  - `PolyendTracker_bank.ptf` boots ("1.9.2 BANK") and the selector steps
+    through all four choices. With a reverb or delay send on, the UI froze
+    and the audio crackled: out of CPU.
+  - Diagnostic `bankd` (real cycle counts): the stock reverb costs ~92k
+    cycles a block on hardware (34.5k emulated instructions, so ~2.7 cycles
+    each: SDRAM waits). The first plate went over 150k and was cut back to
+    stock by the guard; the tape costs ~25k. Crackling remained with both
+    effects on stock and sends on every instrument, so part of it may be the
+    pattern's load itself (stock 1.9.2 comparison pending).
+  - `bank3` (int16 plate, 4 taps, readout of the plate's own cost, guard no
+    longer changes the selection) is built but not tested on hardware.
+- **Not done yet:** bank3 on hardware; a stock-firmware crackle baseline;
+  the reverb's own settings page (the firmware has Master Reverb / Master
+  Delay sub-pages, opened by `0x351b8` / `0x350f4`; the button is not yet known) (SDRAM latency is not in
+  instruction counts); loading effects from the SD card (option 2: the same
+  two entry points, with code loaded at runtime).
+- **Korg NTS units:** logue SDK v1 units are linked to fixed addresses on
+  Korg's chip (code `0x20019000`, SDRAM `0xC0420000`, API `0x0807b000`), which
+  don't exist on the K66, so prebuilt units can't run. Units with source can
+  be rebuilt against this bank's entry points.
+
+## 9. Next ideas
 
 - **Momentary performance effects on Master + pads:** beat repeat, tape stop,
   bitcrush and filter sweeps.

@@ -14,6 +14,9 @@
  *  - DJ control: hold Shift + Master and turn the jog wheel; releasing either
  *    button snaps the filter back to centre (via the usual glide). The
  *    position is shown in the firmware's own pop-up ("DJ Low-pass 40%").
+ *  - FX bank selection (fxbank/fx_bank.c): hold Shift + Master and press any
+ *    other button to step through plate/stock reverb x tape/stock delay; the
+ *    choice is shown in the pop-up. That press and its release are swallowed.
  *
  * v2 changes (vs master_fx_v1.c):
  *  - Topology-preserving-transform state-variable filters (Zavalishin/Simper):
@@ -83,6 +86,14 @@
 #define FW_POPUPS       0x20005EC4u
 #define POPUP_SECONDS   1
 
+/* FX bank state (fxbank/fx_bank.c): its header is zeroed at boot so the
+ * bank re-initialises (SDRAM keeps old contents across a reset). */
+#define FX_STATE        0x70F20000u
+#define FX_STATE_HEADER 64
+
+/* Exported for patch/make_ptf.py: proof that patch_boot clears this address. */
+const uint32_t patch_fx_state = FX_STATE;
+
 typedef void (*saturate_fn)(int16_t *out, int32_t *acc, uint32_t mode);
 typedef uint32_t (*engine_init_fn)(void *engine, void *hal, uint32_t arg);
 typedef void (*input_fn)(void *iface, uint32_t id, int32_t value);
@@ -97,7 +108,9 @@ typedef struct {
     uint32_t enabled;            /* +8  0 = pass straight to the saturator */
     uint32_t held;               /* +12 HELD_* bits (UI hooks) */
     uint32_t dj_by_ui;           /* +16 DJ moved by Shift+Master+jog */
-    uint32_t reserved[4];        /* +20 */
+    uint32_t fx_select;          /* +20 FX bank: bit0 stock reverb, bit1 stock delay */
+    uint32_t fx_button;          /* +24 button swallowed by the FX gesture, + 1 */
+    uint32_t reserved[2];        /* +28 */
     uint32_t init;               /* +36 INIT_MAGIC once initialised */
     uint32_t calls;              /* +40 */
     float eq_cur[BANDS];         /* smoothed EQ gains, -1..+1 */
@@ -382,8 +395,12 @@ uint32_t patch_boot(void *engine, void *hal, uint32_t arg)
 #pragma clang loop unroll(disable)
     for (uint32_t i = 0; i < sizeof(patch_state_t) / 4; i++) w[i] = 0;
     patch_state_t *s = (patch_state_t *)PATCH_STATE;
+    volatile uint32_t *fx = (volatile uint32_t *)FX_STATE;
+#pragma clang loop unroll(disable)
+    for (uint32_t i = 0; i < FX_STATE_HEADER / 4; i++) fx[i] = 0;
     s->magic = STATE_MAGIC;
     s->enabled = 1;
+    s->fx_select = 3;            /* diagnostic build: start on the stock effects */
     return ((engine_init_fn)FW_ENGINE_INIT)(engine, hal, arg);
 }
 
@@ -424,12 +441,70 @@ static void show_dj(patch_state_t *s, float dj)
     ((popup_fn)FW_POPUP)((void *)FW_POPUPS, 0, s->popup_text, POPUP_SECONDS);
 }
 
-/* Press and release. Always forwarded, so Shift and Master keep their normal
- * behaviour; releasing either one ends the gesture and recentres the DJ. */
+static const char *const fx_names[4] = {
+    "Plate rev + Tape dly", "Stock rev + Tape dly",
+    "Plate rev + Stock dly", "Stock rev + Stock dly",
+};
+
+static char *put_k(char *p, uint32_t cycles)      /* cycles -> "41" (thousands) */
+{
+    uint32_t k = (cycles + 500) / 1000;
+    char tmp[6];
+    int n = 0;
+    do { tmp[n++] = (char)('0' + k % 10); k /= 10; } while (k && n < 5);
+    while (n) *p++ = tmp[--n];
+    return p;
+}
+
+/* Cost readout when Shift + Master are both held, in thousand cycles per
+ * block (a block is ~522k): R = reverb now (average), P = plate's largest
+ * block since it was selected, D = delay now, T = tape's largest block;
+ * "!" = the guard switched that effect back to stock. "R92 P180! D25 T30k" */
+static void show_cpu(patch_state_t *s)
+{
+    const volatile uint32_t *fx = (const volatile uint32_t *)FX_STATE;
+    char *p = put(s->popup_text, "R");
+    p = put_k(p, fx[1]);
+    p = put(p, " P"); p = put_k(p, fx[6]);
+    if (fx[13] & 1) *p++ = '!';
+    p = put(p, " D"); p = put_k(p, fx[7]);
+    p = put(p, " T"); p = put_k(p, fx[12]);
+    if (fx[13] & 2) *p++ = '!';
+    *p++ = 'k';
+    *p = 0;
+    ((popup_fn)FW_POPUP)((void *)FW_POPUPS, 0, s->popup_text, 2);
+}
+
+static void show_fx(patch_state_t *s)
+{
+    char *p = put(s->popup_text, fx_names[s->fx_select & 3]);
+    *p = 0;
+    ((popup_fn)FW_POPUP)((void *)FW_POPUPS, 0, s->popup_text, POPUP_SECONDS);
+}
+
+/* Press and release. Shift and Master are always forwarded, so they keep their
+ * normal behaviour; releasing either one ends the DJ gesture and recentres the
+ * DJ. Any other button pressed while both are held steps the FX bank and is
+ * not forwarded (nor its hold/release). */
 void ui_button(void *iface, uint32_t btn, int32_t state)
 {
     patch_state_t *s = (patch_state_t *)PATCH_STATE;
+    if (s->fx_button && s->fx_button == btn + 1) {
+        if (state == 0) s->fx_button = 0;
+        return;
+    }
     uint32_t bit = held_bit(btn);
+    if (bit && state == 1 && (s->held | bit) == (HELD_MASTER | HELD_SHIFT) && s->held != (s->held | bit)) {
+        s->held |= bit;
+        show_cpu(s);
+    }
+    if (!bit && state == 1 && (s->held & (HELD_MASTER | HELD_SHIFT)) == (HELD_MASTER | HELD_SHIFT)) {
+        s->fx_select = (s->fx_select + 1) & 3;
+        s->fx_button = btn + 1;
+        ((volatile uint32_t *)FX_STATE)[13] = 0;    /* clear the bank's CPU guard: try again */
+        show_fx(s);
+        return;
+    }
     if (bit) {
         if (state == 1) {
             s->held |= bit;

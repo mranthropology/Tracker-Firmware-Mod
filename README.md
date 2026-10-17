@@ -47,6 +47,8 @@ Song tests (m5–m7, m9–m12) expect a Tracker project copied to `projects/<nam
 | `m15_braids_ptf_verify.py [ptf]` | Checks a `.ptf` with Braids: one gap-free block; every byte equals the tested image; the decoded image booted as-is (garbage SDRAM) renders bit-identical to the harness-patched render |
 | `m16_braids_rate.py [--check]` | Which Braids models depend on the sample rate beyond pitch (decay times at 44.1 kHz vs native 96 kHz); `--check` verifies the resampled 96 kHz path (decays, tuning, cost) |
 | `m17_braids_templates.py [dir]` | Checks the 48 `BR-` template instruments: CRC, frame count, header, name/mode, and that each plays as its model through the patched firmware |
+| `m18_fx_bank.py [--quick]` | FX bank: plate vs stock reverb (level, decay vs Size, stereo, cost, idle, clearing), tape vs stock delay (echo times/levels, ping-pong, time-change glide, max feedback), the Shift + Master + button selector, and whole-engine renders (all-stock selection bit-identical to master_fx alone) |
+| `m19_fxbank_ptf_verify.py [ptf]` | Checks a `.ptf` with the FX bank: one gap-free block; every byte equals the tested image; vtables point at the bank; the decoded image booted with garbage SDRAM renders bit-identical to the harness |
 | `m11_sdram_audit.py` | Watches every SDRAM access above the firmware's top object (`0x70ef8874`–`0x71000000`) over boot, load and playback; the patch state must be the only thing used there |
 | `m10_dj_control.py [--demo]` | DJ on Shift + Master + jog wheel with snap-back: input routing, audio, clicks; `--demo` plays the gesture over pattern 1 → `out/*_djcontrol.wav` |
 
@@ -317,6 +319,74 @@ Song tests (m5–m7, m9–m12) expect a Tracker project copied to `projects/<nam
   templates.
 - **Not done yet:** listening checks for the 96 kHz models on hardware; a
   4-track stress test with bell, drum or snare; a real-cycle cost measurement.
+
+### Swappable master reverb/delay (`fxbank/`) — work in progress, unstable
+
+> **⚠️ Work in progress, unstable.** On hardware the first build froze the UI
+> and crackled once a reverb or delay send was on. The current code is a
+> diagnostic build (boots on the stock effects, shows real CPU cost, cuts
+> an effect back to stock when it runs too long) and has not been tested on
+> hardware yet. Don't use it for anything you care about.
+
+
+- **Where the effects live:** each master effect is one AudioStream node,
+  reached only through slot 0 (update) of its vtable in flash:
+  - reverb: `engine+0x1c18` = `0x1fffae9c`, vtable `0xa9efc`, update `0xcfdc4`.
+    Stereo in (`receiveWritable` `0xce590`, inputs 0/1), processed in place by
+    the core `0x5d1a8` (on node+`0x1c`), stereo out. Two 32 KB int16 lines
+    (`0x70262000`, `0x70ec6cfc`); reset `0xcfe24`. Bypass flag +`0x80`.
+    ~34k instructions per block, the costliest node in the graph.
+  - delay: `engine+0x1c1c` = `0x1fffae48`, vtable `0xa9f54`, update `0xd037c`
+    → process `0xd0224`. Mono in (`receiveReadOnly` `0xce578`), stereo out.
+    Three 2^18-sample int16 lines (+`0x14`/+`0x18`/+`0x1c` →
+    `0x700e2000`/`0x70162000`/`0x701e2000`), write index +`0x20`. Mono uses
+    line +`0x1c` on both outputs; ping-pong feeds the input into line +`0x18`
+    (output 1) and line +`0x14` (output 0) hears its echo. ~8k per block.
+  - AudioStream layout here: +4 active/num_inputs, +8 destination list,
+    +`0xc` input queue, +`0x10` next in the update list.
+- **Stock parameters** (engine setters `0x1587c`… → node fields):
+  - reverb (Master Reverb page: Size, Damping, Predelay, Diffusion):
+    +`0x54` Size, +`0x5c` 1 − Damping, +`0x6c` Predelay × 5000 samples,
+    +`0x58` Diffusion.
+  - delay (Master Delay page: PingPong, Sync, Rate, Time, Feedback, Filter):
+    time `0xcfee8` (ms, max 3500, × 44.1 → +`0x28` samples; Sync `0xcff50`
+    computes it from the tempo), feedback `0xcfe88` (0..0.99 × 255 → +`0x2c`),
+    +`0x2e` ping-pong, +`0x2d` off, filter `0xcffe0` (Hz → one-pole Q10
+    coefficients +`0x30`/+`0x34`/+`0x38`, applied to every line read).
+- **The bank** (`fxbank/fx_bank.c`, 11 KB at `0xF8000`, no .data/.bss):
+  `make_ptf --hooks …,fx` points the two vtable words at `reverb_update` /
+  `delay_update`. Each runs its algorithm or tail-calls the stock update.
+  Both read the stock fields above, so the stock pages drive them.
+  - **Plate:** Dattorro (JAES 1997), delays scaled 29761 → 44117.6 Hz and
+    rounded to even lengths. int16 lines in free SDRAM (`0x70F21000`, 106 KB),
+    read and written as aligned 32-bit pairs: on hardware SDRAM accesses
+    dominate the cost (the first float version with 7 taps per side cost over
+    150k cycles a block). Every delay and output tap is longer than a block,
+    so it runs stage by stage over whole blocks. Size → decay 0.30–0.97,
+    Damping → tank low-pass, Diffusion → input diffusers, Predelay as stock.
+    Mono-summed input, 4 taps per side, level matched to stock. Skips all
+    work after 16 blocks of silent input and a tail within ±8; zeroes its
+    lines over 7 silent blocks after boot or a switch (SDRAM holds garbage at power-on).
+  - **Tape:** one read head on the stock delay's own lines and write index, so
+    switching to/from stock keeps the echoes. Delay time glides (slew-limited
+    to ±25 % pitch, ~90 ms time constant), wow 0.55 Hz + drift 0.13 Hz +
+    flutter 6.3 Hz, head-loss low-pass ~8.5 kHz, the stock loop filter, a DC
+    blocker, tanh saturation when recording. Feedback × 1.03, so the top of
+    the Feedback range self-oscillates (bounded by the saturation).
+  - **Selection:** hold Shift + Master and press any other button: Plate +
+    Tape → Stock rev + Tape → Plate + Stock dly → all stock. Boots on all
+    stock (diagnostic build). The pop-up shows the choice. That button's
+    press and release are swallowed; Shift and Master are forwarded as
+    before. Stored at patch state +20; patch_boot zeroes the bank's state
+    header (`0x70F20000`). Switching back to the stock reverb runs its reset,
+    so no stale tail.
+  - **Diagnostics:** each update is timed with the DWT cycle counter.
+    Pressing Shift + Master shows `R92 P140 D25 T27k`: reverb now, plate's
+    largest block since selected, delay now, tape's largest block (thousand
+    cycles; a block is ~522k). A guard puts an effect back on stock while it
+    stays over 150k (plate) or 80k (tape) cycles for 4 blocks (`!` in the
+    readout); the next selector press clears it.
+- **Results (m18):** see FINDINGS.md §8.
 
 ### Playback
 

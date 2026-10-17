@@ -114,6 +114,13 @@ BOOT_HOOK_SITE = 0x0000_F3FA       # app setup's only call: 'bl 0x1611c' (engine
 BRAIDS_BIN = Path(__file__).parent / "braids" / "build" / "braids.bin"
 BRAIDS_HOOKS = {0xD0758: ("90f82130", "braids_render_stub"),   # ldrb.w r3,[r0,#0x21]
                 0xD0A50: ("94f82c30", "braids_note_stub")}     # ldrb.w r3,[r4,#0x2c]
+# FX bank (fxbank/fx_bank.bin): vtable slot 0 (update) of the master reverb/delay nodes
+FXBANK_BIN = Path(__file__).parent / "fxbank" / "fx_bank.bin"
+FXBANK_BASE = 0x000F_8000
+FXBANK_VTABLES = {0xA9EFC: (0xCFDC5, "reverb_update"),   # reverb node 0x1fffae9c
+                  0xA9F54: (0xD037D, "delay_update")}     # delay node 0x1fffae48
+FXBANK_STATE = 0x70F2_0000
+REVERB_NODE, DELAY_NODE = 0x1FFF_AE9C, 0x1FFF_AE48
 UI_POPUP = 0x0002_A71C             # popup(popups 0x20005ec4, unused, text, seconds)
 BTN_MASTER = 12                    # Master screen registers its press/release handler here
 BTN_SHIFT = 29                     # handled by every screen; knob acceleration reads it
@@ -505,6 +512,26 @@ class TrackerEmu:
         self._boot_entry = syms["braids_boot"]
         self.braids_syms = syms
         return syms
+
+    def apply_fxbank_patch(self) -> dict:
+        """Install fx_bank.bin and point the reverb/delay vtables' update at it.
+
+        Selection lives in the master_fx state (+20); apply after
+        apply_master_fx_patch(). Works before or after init_engine().
+        """
+        syms = {k: int(v, 16) for k, v in (l.split() for l in
+                FXBANK_BIN.with_suffix(".bin.syms").read_text().splitlines())}
+        self.uc.mem_write(FXBANK_BASE, FXBANK_BIN.read_bytes())
+        for vtable, (stock, name) in FXBANK_VTABLES.items():
+            if self.r32(vtable) != stock:
+                raise RuntimeError(f"unexpected update pointer in vtable {vtable:#x}")
+            self.w32(vtable, syms[name])
+        self.fxbank_syms = syms
+        return syms
+
+    def set_fx_select(self, value: int) -> None:
+        """FX bank selection: bit0 = stock reverb, bit1 = stock delay."""
+        self.w32(PATCH_STATE + 20, value)
 
     def record_ui_passthrough(self) -> list:
         """Replace the interface's knob/button handlers with recorders.

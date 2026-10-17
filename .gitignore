@@ -34,6 +34,11 @@
 !braids/build/
 !braids/build/braids.bin
 !braids/build/braids.bin.syms
+!fxbank/
+!fxbank/build.sh
+!fxbank/fx_bank.c
+!fxbank/fx_bank.bin
+!fxbank/fx_bank.bin.syms
 # never, even if re-included above by mistake
 *.ptf
 firmware/

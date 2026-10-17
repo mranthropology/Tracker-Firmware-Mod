@@ -1,11 +1,14 @@
 """Build a patched Tracker .ptf (Intel HEX) from the stock 1.9.2 .ptf.
 
 Usage: python3 -m patch.make_ptf <stock .ptf> <out .ptf> [--hooks LIST] [--marker TEXT]
-  --hooks   comma list of: boot, audio, ui, codec, braids (default: all but
-            braids). "none" = no patch code at all (marker only). braids adds
-            braids/build/braids.bin at its link address (0xD9000) and the
-            player hooks 0xd0758/0xd0a50; startup then goes through
+  --hooks   comma list of: boot, audio, ui, codec, braids, fx (default: all
+            but braids and fx). "none" = no patch code at all (marker only).
+            braids adds braids/build/braids.bin at its link address (0xD9000)
+            and the player hooks 0xd0758/0xd0a50; startup then goes through
             braids_boot, which chains to patch_boot (so it needs boot).
+            fx adds fxbank/fx_bank.bin at 0xF8000 and points the master
+            reverb/delay vtables' update (0xa9efc, 0xa9f54) at it; it needs
+            boot (clears its state) and ui (the selection gesture).
   --marker  version suffix shown in Config (e.g. "T1"): the version format
             strings move into the appended region, so the text appears only
             if the updater really programmed that region.
@@ -118,9 +121,14 @@ def write_hex(stock_text: str, image: bytes, extra: tuple[int, int] | None = Non
 
 VERSION_FORMATS = {0x2887C: (0xA2B6C, b"%d.%d.%d beta %d"),   # literal pool -> format
                    0x288A0: (0xA2B60, b"%d.%d.%d")}           # (startup 0x2878c)
-ALL_HOOKS = ("boot", "audio", "ui", "codec", "braids")
+ALL_HOOKS = ("boot", "audio", "ui", "codec", "braids", "fx")
 DEFAULT_HOOKS = ("boot", "audio", "ui", "codec")
 BRAIDS_BIN = PATCH_DIR.parent / "braids" / "build" / "braids.bin"
+FXBANK_BIN = PATCH_DIR.parent / "fxbank" / "fx_bank.bin"
+FXBANK_BASE = 0xF8000
+FXBANK_STATE = 0x70F20000          # master_fx.c's patch_boot zeroes its header
+FXBANK_VTABLES = {0xA9EFC: (0xCFDC5, "reverb_update"),   # vtable slot 0 (update)
+                  0xA9F54: (0xD037D, "delay_update")}
 BRAIDS_HOOKS = {0xD0758: ("90f82130", "braids_render_stub"),   # ldrb.w r3,[r0,#0x21]
                 0xD0A50: ("94f82c30", "braids_note_stub")}     # ldrb.w r3,[r4,#0x2c]
 
@@ -143,6 +151,21 @@ def patched_image(stock: bytearray, hooks=DEFAULT_HOOKS, marker: str | None = No
         if bsyms.get("__next_boot") != syms["patch_boot"]:
             raise RuntimeError("braids.bin was built against a different master_fx.bin; rerun braids/build.sh")
         binary = binary + b"\xff" * (bbase - PATCH_BASE - len(binary)) + BRAIDS_BIN.read_bytes()
+    fsyms = None
+    if "fx" in hooks:
+        if not {"boot", "ui"} <= set(hooks):
+            raise RuntimeError("fx needs boot (state reset) and ui (selection gesture)")
+        at = syms.get("patch_fx_state")
+        if at is None or struct.unpack_from("<I", binary, at - PATCH_BASE)[0] != FXBANK_STATE:
+            raise RuntimeError("master_fx.bin does not clear the FX bank state; rebuild patch/")
+        fsyms = {k: int(v, 16) for k, v in (l.split() for l in
+                 FXBANK_BIN.with_suffix(".bin.syms").read_text().splitlines())}
+        if PATCH_BASE + len(binary) > FXBANK_BASE:
+            raise RuntimeError("fx_bank.bin overlaps the code before it")
+        if not all(FXBANK_BASE <= fsyms[n] < FXBANK_BASE + len(FXBANK_BIN.read_bytes())
+                   for _, n in FXBANK_VTABLES.values()):
+            raise RuntimeError("fx_bank.bin is not linked at 0xF8000")
+        binary = binary + b"\xff" * (FXBANK_BASE - PATCH_BASE - len(binary)) + FXBANK_BIN.read_bytes()
     if marker:
         binary += b"\0" * (-len(binary) % 4)
         marker_at = {}
@@ -175,6 +198,11 @@ def patched_image(stock: bytearray, hooks=DEFAULT_HOOKS, marker: str | None = No
         if bytes(image[addr:addr + 4]) != thumb_branch(addr, old, link):
             raise RuntimeError(f"unexpected stock bytes at {addr:#x}")
         image[addr:addr + 4] = thumb_branch(addr, new & ~1, link)
+    if fsyms:
+        for vtable, (stock_ptr, name) in FXBANK_VTABLES.items():
+            if struct.unpack_from("<I", image, vtable)[0] != stock_ptr:
+                raise RuntimeError(f"unexpected update pointer at {vtable:#x}")
+            struct.pack_into("<I", image, vtable, fsyms[name])
     if "codec" in hooks:
         if bytes(image[0x704C0:0x704C2]) != bytes.fromhex("70b5"):   # push {r4-r6, lr}
             raise RuntimeError("unexpected stock bytes at 0x704c0")

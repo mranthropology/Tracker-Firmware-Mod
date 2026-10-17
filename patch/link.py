@@ -49,7 +49,7 @@ def symbols(d, secs):
             "<IIIBBH", d, symtab["off"] + 16 * i)
         end = d.index(b"\0", strtab["off"] + name)
         out.append(dict(name=d[strtab["off"] + name:end].decode(), value=value,
-                        shndx=shndx, type=info & 0xF))
+                        shndx=shndx, type=info & 0xF, bind=info >> 4))
     return out
 
 
@@ -154,8 +154,8 @@ def link(obj: Path, base: int, ram_base: int | None = None):
             image = image_saved
     if ram_base is not None:
         image += data
-    exports = {s["name"]: sym_addr(s) for s in syms
-               if s["type"] == 2 and s["shndx"] in layout}
+    exports = {s["name"]: sym_addr(s) for s in syms     # functions, global objects
+               if (s["type"] == 2 or (s["type"] == 1 and s["bind"] == 1)) and s["shndx"] in layout}
     exports.update(extra_syms)
     return bytes(image), exports
 
