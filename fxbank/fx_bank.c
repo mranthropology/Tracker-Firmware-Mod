@@ -117,6 +117,15 @@ enum { L_PRE, L_AP1, L_AP2, L_AP3, L_AP4, L_LMOD, L_LD1, L_LAP, L_LD2,
 #define FX_STATE        0x70F20000u             /* free SDRAM (see README) */
 #define FX_MAGIC        0x4B4E4246u             /* 'FBNK' */
 #define PLATE_MEM       ((int16_t *)(FX_STATE + 0x1000))
+/* Internal SRAM for the short lines (input all-passes, modulated all-passes):
+ * 10 KB from the firmware's heap, allocated once by patch_boot (master_fx.c)
+ * and stored at patch state +28. SDRAM is used if it is 0.
+ * Idea credit: OpenTracker (https://github.com/sandlbn/polyend-tracker-re, MIT) keeps its
+ * stock-style reverb's input all-passes in an SRAM ring and documents the
+ * Tracker's SDRAM as 16-bit. No code was taken from it; the allocation and
+ * line layout here are this project's own. */
+#define FX_SRAM         (*(int16_t *volatile *)(PATCH_STATE + 28))
+#define SRAM_SAMPLES    (SZ_AP1 + SZ_AP2 + SZ_AP3 + SZ_AP4 + SZ_LMOD + SZ_RMOD)   /* 5120 */
 
 enum { MODE_NONE = 0, MODE_BANK, MODE_STOCK };
 
@@ -227,7 +236,21 @@ static inline float soft_sat(float x)        /* tanh, Pade 3/2, |x| <= 3 */
 
 typedef uint32_t __attribute__((may_alias)) pair_t;
 
-static inline int16_t *line(uint32_t off) { return PLATE_MEM + off; }
+static int16_t *line(uint32_t off)
+{
+    int16_t *sram = FX_SRAM;
+    if (sram) {
+        switch (off) {
+        case OFF_AP1:  return sram;
+        case OFF_AP2:  return sram + SZ_AP1;
+        case OFF_AP3:  return sram + SZ_AP1 + SZ_AP2;
+        case OFF_AP4:  return sram + SZ_AP1 + SZ_AP2 + SZ_AP3;
+        case OFF_LMOD: return sram + SZ_AP1 + SZ_AP2 + SZ_AP3 + SZ_AP4;
+        case OFF_RMOD: return sram + SZ_AP1 + SZ_AP2 + SZ_AP3 + SZ_AP4 + SZ_LMOD;
+        }
+    }
+    return PLATE_MEM + off;
+}
 
 static inline uint32_t pack(float a, float b)
 {
@@ -473,6 +496,9 @@ static void reverb_work(fx_state_t *s, void *node)
         if (end > PLATE_WORDS) end = PLATE_WORDS;
         pair_t *m = (pair_t *)PLATE_MEM;
         for (uint32_t i = s->clear_pos / 2; i < end / 2; i++) m[i] = 0;
+        pair_t *sm = (pair_t *)FX_SRAM;
+        if (sm && s->clear_pos == 0)                       /* first clearing block */
+            for (uint32_t i = 0; i < SRAM_SAMPLES / 2; i++) sm[i] = 0;
         s->clear_pos = end;
         s->bw_z = s->damp_l = s->damp_r = 0.0f;
         ((release_fn)FW_RELEASE)(bl);

@@ -91,6 +91,15 @@
 #define FX_STATE        0x70F20000u
 #define FX_STATE_HEADER 64
 
+/* Firmware malloc (newlib, 0x9529c -> _malloc_r 0x952bc; sbrk 0xc9a0 lets the
+ * heap grow up to 8 KB below the stack). The FX bank's short delay lines go
+ * in internal SRAM, which is much faster than SDRAM; taking the memory from
+ * the firmware's own heap at boot means nothing else can ever be given it.
+ * Only at boot: malloc is not safe from the audio interrupt. */
+#define FW_MALLOC       0x0009529Du
+#define FX_SRAM_BYTES   10240u          /* fx_bank.c: SRAM_SAMPLES * 2 */
+typedef void *(*malloc_fn)(uint32_t size);
+
 /* Exported for patch/make_ptf.py: proof that patch_boot clears this address. */
 const uint32_t patch_fx_state = FX_STATE;
 
@@ -110,7 +119,8 @@ typedef struct {
     uint32_t dj_by_ui;           /* +16 DJ moved by Shift+Master+jog */
     uint32_t fx_select;          /* +20 FX bank: bit0 stock reverb, bit1 stock delay */
     uint32_t fx_button;          /* +24 button swallowed by the FX gesture, + 1 */
-    uint32_t reserved[2];        /* +28 */
+    void *fx_sram;               /* +28 SRAM for the FX bank's short lines (0: none) */
+    uint32_t reserved[1];        /* +32 */
     uint32_t init;               /* +36 INIT_MAGIC once initialised */
     uint32_t calls;              /* +40 */
     float eq_cur[BANDS];         /* smoothed EQ gains, -1..+1 */
@@ -400,6 +410,7 @@ uint32_t patch_boot(void *engine, void *hal, uint32_t arg)
     for (uint32_t i = 0; i < FX_STATE_HEADER / 4; i++) fx[i] = 0;
     s->magic = STATE_MAGIC;
     s->enabled = 1;
+    s->fx_sram = ((malloc_fn)FW_MALLOC)(FX_SRAM_BYTES);
     s->fx_select = 3;            /* diagnostic build: start on the stock effects */
     return ((engine_init_fn)FW_ENGINE_INIT)(engine, hal, arg);
 }

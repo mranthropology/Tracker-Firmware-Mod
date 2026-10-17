@@ -364,7 +364,17 @@ Song tests (m5–m7, m9–m12) expect a Tracker project copied to `projects/<nam
     150k cycles a block). Every delay and output tap is longer than a block,
     so it runs stage by stage over whole blocks. Size → decay 0.30–0.97,
     Damping → tank low-pass, Diffusion → input diffusers, Predelay as stock.
-    Mono-summed input, 4 taps per side, level matched to stock. Skips all
+    Mono-summed input, 4 taps per side, level matched to stock. The short
+    lines (4 input all-passes, 2 modulated all-passes: 5120 samples, 10 KB)
+    live in internal SRAM: patch_boot takes them from the firmware's own heap
+    with its `malloc` (`0x9529c`; newlib, sbrk `0xc9a0` allows growth to 8 KB
+    below the stack), so nothing else can be given that memory. If the
+    allocation fails they stay in SDRAM; the output is bit-identical either way.
+    Experimental, untested on hardware. Credit: the idea of putting the
+    reverb's short all-pass lines in SRAM, and the note that the Tracker's
+    SDRAM bus is 16-bit, come from OpenTracker, the clean-room firmware
+    reimplementation at [sandlbn/polyend-tracker-re](https://github.com/sandlbn/polyend-tracker-re)
+    (MIT; `src/core/audio/effects.h`, `src/hal/board.h`). No code was copied. Skips all
     work after 16 blocks of silent input and a tail within ±8; zeroes its
     lines over 7 silent blocks after boot or a switch (SDRAM holds garbage at power-on).
   - **Tape:** one read head on the stock delay's own lines and write index, so

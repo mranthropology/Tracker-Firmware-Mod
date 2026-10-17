@@ -222,6 +222,18 @@ built-in bank with a plate reverb and a tape delay.
     pattern's load itself (stock 1.9.2 comparison pending).
   - `bank3` (int16 plate, 4 taps, readout of the plate's own cost, guard no
     longer changes the selection) is built but not tested on hardware.
+  - `bank4` (experimental) adds the plate's short lines in internal SRAM
+    (10 KB from the firmware heap at boot; ~37 % of its memory traffic). Not
+    tested on hardware. The approach follows OpenTracker
+    ([sandlbn/polyend-tracker-re](https://github.com/sandlbn/polyend-tracker-re), MIT), which keeps
+    its reverb's input all-passes in SRAM and documents the SDRAM as 16-bit;
+    the implementation here is independent.
+- **Independent confirmation:** OpenTracker's source agrees with several
+  findings here: the 44,117.647 Hz output rate, Master EQ/Bass Boost/Space in
+  the SGTL5000, Master = button 12, reverb Predelay × 5000 and Damping as
+  1 − value, the delay's three int16 lines (ping-pong A+B, mono C), and the
+  `.pti` layout (body 0x174 at 0x10, CRC at 0x184, audio at 0x188). It also
+  identifies the stock reverb as following the Clouds/Rings FxEngine reverb.
 - **Not done yet:** bank3 on hardware; a stock-firmware crackle baseline;
   the reverb's own settings page (the firmware has Master Reverb / Master
   Delay sub-pages, opened by `0x351b8` / `0x350f4`; the button is not yet known) (SDRAM latency is not in

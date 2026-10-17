@@ -161,6 +161,30 @@ def reverb_tests():
           f"{results['clearing']} blocks")
 
 
+    # short lines in SRAM: allocated from the firmware heap at boot, and the
+    # plate sounds exactly the same as with every line in SDRAM
+    emu = boot()
+    sram = emu.r32(PATCH_STATE + 28)
+    brk = emu.r32(0x1FFF5CA0)                       # newlib heap top (sbrk 0xc9a0)
+    good = 0x200103F4 <= sram and sram + 10240 <= brk
+    ok &= good
+    print(f"   {'ok ' if good else 'BAD'} plate SRAM block {sram:#x}+10 KB, inside the firmware heap "
+          f"(0x200103f4..{brk:#x})")
+    outs = []
+    for use_sram in (True, False):
+        emu = boot()
+        if not use_sram:
+            emu.w32(PATCH_STATE + 28, 0)
+        rig = NodeRig(emu, REVERB_NODE)
+        for _ in range(8):
+            rig.step([[0] * 128, [0] * 128])
+        l, r, cost = run_reverb(emu, rig, 120, burst)
+        outs.append((l + r, sum(cost[burst:burst + 50]) / 50))
+    good = outs[0][0] == outs[1][0]
+    ok &= good
+    print(f"   {'ok ' if good else 'BAD'} short lines in SRAM vs SDRAM: output "
+          f"{'bit-identical' if good else 'DIFFERENT'} ({outs[0][1]:,.0f} vs {outs[1][1]:,.0f} insns/block)")
+
     # idle: short tail, then silence -> the plate stops working
     emu = boot()
     emu.uc.mem_write(REVERB_NODE + 0x54, struct.pack("<f", 0.0))
