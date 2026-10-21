@@ -132,4 +132,4 @@ braids_voice_size 0x000d9001
 braids_voice_strike 0x000d9295
 memcpy 0x000d97e5
 memset 0x000d9231
-__next_boot 0x000d7a25
+__next_boot 0x000d7a81

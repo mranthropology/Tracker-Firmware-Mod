@@ -118,7 +118,8 @@ BRAIDS_HOOKS = {0xD0758: ("90f82130", "braids_render_stub"),   # ldrb.w r3,[r0,#
 FXBANK_BIN = Path(__file__).parent / "fxbank" / "fx_bank.bin"
 FXBANK_BASE = 0x000F_8000
 FXBANK_VTABLES = {0xA9EFC: (0xCFDC5, "reverb_update"),   # reverb node 0x1fffae9c
-                  0xA9F54: (0xD037D, "delay_update")}     # delay node 0x1fffae48
+                  0xA9F54: (0xD037D, "delay_update"),     # delay node 0x1fffae48
+                  0x9FD04: (0x0F57D, "block_service_timed")}   # app table: audio block service
 FXBANK_STATE = 0x70F2_0000
 REVERB_NODE, DELAY_NODE = 0x1FFF_AE9C, 0x1FFF_AE48
 UI_POPUP = 0x0002_A71C             # popup(popups 0x20005ec4, unused, text, seconds)
@@ -529,11 +530,26 @@ class TrackerEmu:
         self.fxbank_syms = syms
         return syms
 
+    def apply_ct_patch(self) -> None:
+        """Conditional trigs: the five hooks of patch.make_ptf.CT_SITES (code in
+        master_fx.bin, so apply after apply_master_fx_patch())."""
+        from patch.link import thumb_branch
+        from patch.make_ptf import CT_SITES
+        syms = {k: int(v, 16) for k, v in (l.split() for l in
+                (PATCH_DIR / "master_fx.bin.syms").read_text().splitlines())}
+        for site, stock_hex, name, kind in CT_SITES:
+            n = 6 if kind == "bw6" else 4
+            if bytes(self.uc.mem_read(site, n)).hex() != stock_hex:
+                raise RuntimeError(f"unexpected bytes at CT hook {site:#x}")
+            new = thumb_branch(site, syms[name] & ~1, kind == "bl")
+            self.uc.mem_write(site, new + (b"\x00\xbf" if kind == "bw6" else b""))
+        self.ct_syms = syms
+
     def set_fx_select(self, value: int) -> None:
         """FX bank selection: bit0 = stock reverb, bit1 = stock delay."""
         self.w32(PATCH_STATE + 20, value)
 
-    def record_ui_passthrough(self) -> list:
+    def record_ui_passthrough(self, skip_probe: bool = True) -> list:
         """Replace the interface's knob/button handlers with recorders.
 
         The UI (screens, function manager) is not initialised in the harness,
@@ -542,6 +558,8 @@ class TrackerEmu:
         for the firmware's pop-up.
         """
         log = []
+        if skip_probe:   # master_fx's flash-probe pop-up (first press after boot): treat as shown
+            self.w32(PATCH_STATE + 32, self.r32(PATCH_STATE + 32) | 0x40000000)
 
         def popup(emu):
             _, _, text, seconds = emu.args(4)

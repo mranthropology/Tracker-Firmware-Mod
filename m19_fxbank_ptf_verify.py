@@ -51,6 +51,7 @@ def boot(emu, patch_harness, boot_entry=None):
         emu.apply_master_fx_patch()
         emu.apply_braids_patch()
         emu.apply_fxbank_patch()
+        emu.apply_ct_patch()
     else:
         emu._boot_entry = boot_entry
         for base, size in GARBAGE:
@@ -74,6 +75,7 @@ def main():
     harness.apply_master_fx_patch()
     harness.apply_braids_patch()
     harness.apply_fxbank_patch()
+    harness.apply_ct_patch()
     tested = bytes(harness.uc.mem_read(FLASH[0], FLASH[1]))
     stock = (ROOT / "firmware" / "tracker_1.9.2.bin").read_bytes()
     fx = PATCH_DIR / "master_fx.bin"
@@ -91,7 +93,7 @@ def main():
     vt_ok = all(struct.unpack_from("<I", image, vt)[0] == syms(FXBANK_BIN.with_suffix(".bin.syms"))[n]
                 for vt, n in ((0xA9EFC, "reverb_update"), (0xA9F54, "delay_update")))
     ok &= not diff and gap_ok and tramp_ok and vt_ok
-    print(f"2. {len(image):,} bytes vs harness image (stock + master FX + Braids + FX bank): "
+    print(f"2. {len(image):,} bytes vs harness image (stock + master FX + Braids + FX bank + CT): "
           f"{'identical' if not diff else f'{len(diff)} differ, first {diff[0]:#x}'}; "
           f"filler 0xff: {'yes' if gap_ok else 'NO'}; trampoline bytes stock: "
           f"{'yes' if tramp_ok else 'NO'}; vtables -> bank: {'yes' if vt_ok else 'NO'}")

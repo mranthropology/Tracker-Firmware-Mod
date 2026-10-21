@@ -100,6 +100,15 @@
 #define FX_SRAM_BYTES   26624u          /* fx_bank.c: SRAM_SAMPLES * 2 */
 typedef void *(*malloc_fn)(uint32_t size);
 
+/* Flash probe (diagnostic). Program flash above the stock image (0xd6460) is
+ * where this patch lives (0xd7000..). The top 16 KB, 0xFC000-0xFFFFF, is never
+ * written by make_ptf (it checks the patch ends below it). SIDTracker /
+ * OpenTracker keep out of everything above 0xd6460 in case the bootloader or
+ * an identity record lives there; if anything does, the top sector is the
+ * likely place. Count the bytes that are not erased (0xFF) there at boot. */
+#define PROBE_START     0x000FC000u
+#define PROBE_END       0x00100000u
+
 /* Exported for patch/make_ptf.py: proof that patch_boot clears this address. */
 const uint32_t patch_fx_state = FX_STATE;
 
@@ -120,7 +129,7 @@ typedef struct {
     uint32_t fx_select;          /* +20 FX bank: bit0 stock reverb, bit1 stock delay */
     uint32_t fx_button;          /* +24 button swallowed by the FX gesture, + 1 */
     void *fx_sram;               /* +28 SRAM for the FX bank's short lines (0: none) */
-    uint32_t reserved[1];        /* +32 */
+    uint32_t flash_probe;        /* +32 see probe_flash(): bit31 done, bit30 shown */
     uint32_t init;               /* +36 INIT_MAGIC once initialised */
     uint32_t calls;              /* +40 */
     float eq_cur[BANDS];         /* smoothed EQ gains, -1..+1 */
@@ -130,7 +139,8 @@ typedef struct {
     svf_t from[STAGES], to[STAGES];
     float wet_from, wet_to;      /* DJ wet amount ramp */
     svf_state_t z[2][STAGES];
-    char popup_text[24];         /* DJ indicator text (pop-up keeps the pointer) */
+    char popup_text[32];         /* pop-up text (the pop-up keeps the pointer) */
+    uint8_t ct_pass[12];         /* conditional trigs: passes per track since play */
 } patch_state_t;
 
 static const float band_hz[BANDS] = {115.0f, 330.0f, 990.0f, 3000.0f, 9900.0f};
@@ -411,6 +421,17 @@ uint32_t patch_boot(void *engine, void *hal, uint32_t arg)
     s->magic = STATE_MAGIC;
     s->enabled = 1;
     s->fx_sram = ((malloc_fn)FW_MALLOC)(FX_SRAM_BYTES);
+    {   /* bits 0-15 count of non-0xFF bytes (saturating), 16-29 first offset */
+        uint32_t n = 0, first = 0;
+#pragma clang loop unroll(disable)
+        for (uint32_t a = PROBE_START; a < PROBE_END; a += 4) {
+            uint32_t v = *(const volatile uint32_t *)a;
+            if (v == 0xFFFFFFFFu) continue;
+            if (!n) first = a - PROBE_START;
+            for (int k = 0; k < 4; k++) n += ((v >> (8 * k)) & 0xFF) != 0xFF;
+        }
+        s->flash_probe = 0x80000000u | (n > 0xFFFF ? 0xFFFF : n) | (first << 16);
+    }
     s->fx_select = 3;            /* diagnostic build: start on the stock effects */
     return ((engine_init_fn)FW_ENGINE_INIT)(engine, hal, arg);
 }
@@ -428,14 +449,14 @@ static uint32_t held_bit(uint32_t btn)
     return btn == BTN_MASTER ? HELD_MASTER : btn == BTN_SHIFT ? HELD_SHIFT : 0;
 }
 
-static char *put(char *p, const char *text)
+__attribute__((noinline, minsize)) static char *put(char *p, const char *text)
 {
     while (*text) *p++ = *text++;
     return p;
 }
 
 /* "DJ Low-pass 40%", "DJ High-pass 25%" or "DJ filter off" in the pop-up. */
-static void show_dj(patch_state_t *s, float dj)
+__attribute__((noinline, minsize)) static void show_dj(patch_state_t *s, float dj)
 {
     char *p = s->popup_text;
     int pct = (int)(fabs_f(dj) * 100.0f + 0.5f);
@@ -457,7 +478,7 @@ static const char *const fx_names[4] = {
     "Plate rev + Stock dly", "Stock rev + Stock dly",
 };
 
-static char *put_k(char *p, uint32_t cycles)      /* cycles -> "41" (thousands) */
+__attribute__((noinline, minsize)) static char *put_k(char *p, uint32_t cycles)      /* cycles -> "41" (thousands) */
 {
     uint32_t k = (cycles + 500) / 1000;
     char tmp[6];
@@ -471,10 +492,17 @@ static char *put_k(char *p, uint32_t cycles)      /* cycles -> "41" (thousands) 
  * block (a block is ~522k): R = reverb now (average), P = plate's largest
  * block since it was selected, D = delay now, T = tape's largest block;
  * "!" = the guard switched that effect back to stock. "R92 P180! D25 T30k" */
-static void show_cpu(patch_state_t *s)
+__attribute__((noinline, minsize)) static char *put_pct(char *p, uint32_t cycles)    /* % of a 522,240-cycle block */
+{
+    return put_k(p, (uint32_t)((float)cycles * (100000.0f / 522240.0f)));   /* put_k rounds */
+}
+
+__attribute__((noinline, minsize)) static void show_cpu(patch_state_t *s)
 {
     const volatile uint32_t *fx = (const volatile uint32_t *)FX_STATE;
-    char *p = put(s->popup_text, "R");
+    char *p = put(s->popup_text, "L");                 /* whole audio block, avg/peak % */
+    p = put_pct(p, fx[14]); *p++ = '/'; p = put_pct(p, fx[15]);
+    p = put(p, "% R");
     p = put_k(p, fx[1]);
     p = put(p, " P"); p = put_k(p, fx[6]);
     if (fx[13] & 1) *p++ = '!';
@@ -486,7 +514,19 @@ static void show_cpu(patch_state_t *s)
     ((popup_fn)FW_POPUP)((void *)FW_POPUPS, 0, s->popup_text, 2);
 }
 
-static void show_fx(patch_state_t *s)
+/* Flash probe result, once per boot on the first button press. */
+static __attribute__((noinline, minsize)) void show_probe(patch_state_t *s)
+{
+    s->flash_probe |= 0x40000000u;
+    uint32_t n = s->flash_probe & 0xFFFF;
+    char *p = put(s->popup_text, "Flash top 16K: ");
+    if (!n) p = put(p, "blank");
+    else { p = put_k(p, n * 1000u); p = put(p, " set"); }
+    *p = 0;
+    ((popup_fn)FW_POPUP)((void *)FW_POPUPS, 0, s->popup_text, 3);
+}
+
+__attribute__((noinline, minsize)) static void show_fx(patch_state_t *s)
 {
     char *p = put(s->popup_text, fx_names[s->fx_select & 3]);
     *p = 0;
@@ -504,6 +544,8 @@ void ui_button(void *iface, uint32_t btn, int32_t state)
         if (state == 0) s->fx_button = 0;
         return;
     }
+    if (state == 1 && (s->flash_probe & 0xC0000000u) == 0x80000000u)
+        show_probe(s);
     uint32_t bit = held_bit(btn);
     if (bit && state == 1 && (s->held | bit) == (HELD_MASTER | HELD_SHIFT) && s->held != (s->held | bit)) {
         s->held |= bit;
@@ -542,3 +584,149 @@ void ui_knob(void *iface, uint32_t pot, int32_t value)
     ((input_fn)FW_KNOB)(iface, pot, value);
 }
 
+
+/* ---------- conditional trigs (Chance values 101-106) ----------
+ *
+ * Elektron-style trig conditions on the stock Chance FX ("C", internal FX
+ * type 4), after Tracker+ Conditional Trigs CT6 (Psygoo/TrackerPlus-CT-Web,
+ * MIT; idea and condition set only - that patch is Tracker+ 1.2.0 code and
+ * nothing of it is used here). Chance 0-100 is unchanged. Above 100:
+ *   101 1:2  102 2:2  103 1:4  104 2:4  105 3:4  106 4:4
+ * A:B plays on pass A of every B passes of that track's pattern, counted
+ * from when playback starts (first pass = 1).
+ *
+ * Hooks (all checked against the stock bytes by make_ptf):
+ *   0xcadda  bl random 0xcba18 (Chance roll)      -> bl ct_chance_stub
+ *   0xcb750  FX max(type) entry (Chance 100)      -> b.w ct_fxmax_stub
+ *   0x146a4  FX value text formatter entry        -> b.w ct_fmt_stub
+ *   0x11ed8  step index wraps to the loop start   -> b.w ct_wrap_stub
+ *   0xc9230  playback start (seq, step)           -> b.w ct_start_stub
+ * Sequencer facts: object 0x1fff953c, track t's step index at +t*0x68+0x80;
+ * the Chance roll compares random(0, max) > value -> skip the note.
+ */
+#define CT_FIRST        101
+#define CT_COUNT        6
+#define CT_TRACKS       12
+#define FW_RANDOM       0x000CBA19u      /* random(lo, hi) */
+typedef int32_t (*random_fn)(int32_t lo, int32_t hi);
+
+static const uint8_t ct_a[CT_COUNT] = {1, 2, 1, 2, 3, 4};
+static const uint8_t ct_b[CT_COUNT] = {2, 2, 4, 4, 4, 4};
+
+/* r0 = lo, r1 = max (106 now), slot: Chance value at slot+0x6c, track from sb. */
+int32_t ct_chance(int32_t lo, int32_t hi, const uint8_t *slot, uint32_t track)
+{
+    uint32_t v = slot[0x6c];
+    if (v >= CT_FIRST && v < CT_FIRST + CT_COUNT && track < CT_TRACKS) {
+        patch_state_t *s = (patch_state_t *)PATCH_STATE;
+        uint32_t i = v - CT_FIRST;
+        int play = (s->ct_pass[track] % ct_b[i]) == (uint32_t)(ct_a[i] - 1);
+        return play ? 0 : 0x7FFFFFFF;            /* <= value plays, > value skips */
+    }
+    return ((random_fn)FW_RANDOM)(lo, hi > 100 ? 100 : hi);   /* stock roll */
+}
+
+void ct_wrap(uint32_t track)
+{
+    patch_state_t *s = (patch_state_t *)PATCH_STATE;
+    if (track < CT_TRACKS && s->ct_pass[track] < 255) s->ct_pass[track]++;
+}
+
+void ct_reset(void)
+{
+    patch_state_t *s = (patch_state_t *)PATCH_STATE;
+    for (int t = 0; t < CT_TRACKS; t++) s->ct_pass[t] = 0;
+}
+
+/* "1:2" etc. into the formatter's buffer (size >= 4 in every caller seen). */
+void ct_label(char *buf, uint32_t size, uint32_t i)
+{
+    if (size < 4) { if (size) buf[0] = 0; return; }
+    buf[0] = (char)('0' + ct_a[i]);
+    buf[1] = ':';
+    buf[2] = (char)('0' + ct_b[i]);
+    buf[3] = 0;
+}
+
+/* bl site: lo/hi in r0/r1; the caller keeps the FX slot in r5 and the track in sb. */
+__attribute__((naked)) void ct_chance_stub(void)
+{
+    __asm volatile("mov r2, r5\n\tmov r3, r9\n\tb ct_chance\n");
+}
+
+/* FX max(type in r1): Chance (4) goes to 106; everything else is the stock
+ * function (its first two instructions replayed, then on at 0xcb754). */
+__attribute__((naked)) void ct_fxmax_stub(void)
+{
+    __asm volatile(
+        "cmp r1, #4\n\t"
+        "bne 1f\n\t"
+        "movs r0, #106\n\t"
+        "bx lr\n"
+        "1:\n\t"
+        "subs r1, #1\n\t"
+        "cmp r1, #0x29\n\t"
+        "ldr.w pc, 2f\n\t"
+        ".p2align 2\n"
+        "2:\n\t"
+        ".word 0x000CB755\n");
+}
+
+/* FX value formatter (this, buf, size, type; stack: value, mode). Chance
+ * 101-106 -> label; otherwise replay "push {r4-r6, lr}; sub sp, #8" and
+ * continue at 0x146a8. */
+__attribute__((naked)) void ct_fmt_stub(void)
+{
+    __asm volatile(
+        "cmp r3, #4\n\t"
+        "bne 9f\n\t"
+        "ldrb.w ip, [sp]\n\t"
+        "sub.w ip, ip, #101\n\t"
+        "cmp ip, #5\n\t"
+        "bhi 9f\n\t"
+        "push {r4, lr}\n\t"
+        "mov r0, r1\n\t"
+        "mov r1, r2\n\t"
+        "mov r2, ip\n\t"
+        "bl ct_label\n\t"
+        "pop {r4, pc}\n"
+        "9:\n\t"
+        "push {r4, r5, r6, lr}\n\t"
+        "sub sp, #8\n\t"
+        "ldr.w pc, 8f\n\t"
+        ".p2align 2\n"
+        "8:\n\t"
+        ".word 0x000146A9\n");
+}
+
+/* Step wrap (track in r5, sequencer in r4): count the pass, then replay
+ * "movs r7, #0x68; mla r6, r7, r5, r4" and continue at 0x11ede. */
+__attribute__((naked)) void ct_wrap_stub(void)
+{
+    __asm volatile(
+        "push {r0, r1, r2, r3, ip, lr}\n\t"
+        "mov r0, r5\n\t"
+        "bl ct_wrap\n\t"
+        "pop {r0, r1, r2, r3, ip, lr}\n\t"
+        "movs r7, #0x68\n\t"
+        "mla r6, r7, r5, r4\n\t"
+        "ldr.w pc, 7f\n\t"
+        ".p2align 2\n"
+        "7:\n\t"
+        ".word 0x00011EDF\n");
+}
+
+/* Playback start: clear the pass counters, then replay
+ * "push.w {r3-r8, sb, lr}" and continue at 0xc9234. */
+__attribute__((naked)) void ct_start_stub(void)
+{
+    __asm volatile(
+        "push {r0, r1, r2, r3, ip, lr}\n\t"
+        "bl ct_reset\n\t"
+        "pop {r0, r1, r2, r3, ip, lr}\n\t"
+        "push.w {r3, r4, r5, r6, r7, r8, r9, lr}\n\t"
+        "ldr.w pc, 6f\n\t"
+        ".p2align 2\n"
+        "6:\n\t"
+        ".word 0x000C9235\n");
+}

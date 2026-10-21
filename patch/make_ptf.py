@@ -6,6 +6,8 @@ Usage: python3 -m patch.make_ptf <stock .ptf> <out .ptf> [--hooks LIST] [--marke
             braids adds braids/build/braids.bin at its link address (0xD9000)
             and the player hooks 0xd0758/0xd0a50; startup then goes through
             braids_boot, which chains to patch_boot (so it needs boot).
+            ct adds conditional trigs on the Chance FX (code in
+            master_fx.bin, five hooks in CT_SITES).
             fx adds fxbank/fx_bank.bin at 0xF8000 and points the master
             reverb/delay vtables' update (0xa9efc, 0xa9f54) at it; it needs
             boot (clears its state) and ui (the selection gesture).
@@ -121,14 +123,23 @@ def write_hex(stock_text: str, image: bytes, extra: tuple[int, int] | None = Non
 
 VERSION_FORMATS = {0x2887C: (0xA2B6C, b"%d.%d.%d beta %d"),   # literal pool -> format
                    0x288A0: (0xA2B60, b"%d.%d.%d")}           # (startup 0x2878c)
-ALL_HOOKS = ("boot", "audio", "ui", "codec", "braids", "fx")
+ALL_HOOKS = ("boot", "audio", "ui", "codec", "braids", "fx", "ct")
 DEFAULT_HOOKS = ("boot", "audio", "ui", "codec")
 BRAIDS_BIN = PATCH_DIR.parent / "braids" / "build" / "braids.bin"
+# Conditional trigs (master_fx.c "conditional trigs"): (site, stock bytes, symbol, kind)
+#   kind "bl" = replace a bl, "bw" = 4-byte b.w, "bw6" = b.w + nop over 6 bytes
+CT_SITES = ((0xCADDA, "00f01dfe", "ct_chance_stub", "bl"),       # bl random 0xcba18 (Chance roll)
+            (0xCB750, "01392929", "ct_fxmax_stub", "bw"),        # FX max(type) entry
+            (0x146A4, "70b582b0", "ct_fmt_stub", "bw"),          # FX value formatter entry
+            (0x11ED8, "682707fb0546", "ct_wrap_stub", "bw6"),    # step index wraps
+            (0xC9230, "2de9f843", "ct_start_stub", "bw"))        # playback start
 FXBANK_BIN = PATCH_DIR.parent / "fxbank" / "fx_bank.bin"
 FXBANK_BASE = 0xF8000
 FXBANK_STATE = 0x70F20000          # master_fx.c's patch_boot zeroes its header
 FXBANK_VTABLES = {0xA9EFC: (0xCFDC5, "reverb_update"),   # vtable slot 0 (update)
-                  0xA9F54: (0xD037D, "delay_update")}
+                  0xA9F54: (0xD037D, "delay_update"),
+                  0x9FD04: (0x0F57D, "block_service_timed")}   # app table: audio block service
+PROBE_START = 0xFC000              # master_fx.c flash probe: must stay unwritten
 BRAIDS_HOOKS = {0xD0758: ("90f82130", "braids_render_stub"),   # ldrb.w r3,[r0,#0x21]
                 0xD0A50: ("94f82c30", "braids_note_stub")}     # ldrb.w r3,[r4,#0x2c]
 
@@ -177,6 +188,8 @@ def patched_image(stock: bytearray, hooks=DEFAULT_HOOKS, marker: str | None = No
         raise RuntimeError("patch area overlaps the stock image")
     if PATCH_BASE + len(binary) > FLASH_SIZE:
         raise RuntimeError("patch does not fit in program flash")
+    if PATCH_BASE + len(binary) > PROBE_START:
+        raise RuntimeError("patch reaches the flash probe area (0xFC000-0xFFFFF)")
     image[PATCH_BASE:PATCH_BASE + len(binary)] = binary
 
     sites = [  # (hook group, address, stock target, link, new target)
@@ -203,6 +216,13 @@ def patched_image(stock: bytearray, hooks=DEFAULT_HOOKS, marker: str | None = No
             if struct.unpack_from("<I", image, vtable)[0] != stock_ptr:
                 raise RuntimeError(f"unexpected update pointer at {vtable:#x}")
             struct.pack_into("<I", image, vtable, fsyms[name])
+    if "ct" in hooks:
+        for site, stock_hex, name, kind in CT_SITES:
+            n = 6 if kind == "bw6" else 4
+            if bytes(image[site:site + n]).hex() != stock_hex:
+                raise RuntimeError(f"unexpected stock bytes at {site:#x}")
+            new = thumb_branch(site, syms[name] & ~1, kind == "bl")
+            image[site:site + n] = new + (b"\x00\xbf" if kind == "bw6" else b"")
     if "codec" in hooks:
         if bytes(image[0x704C0:0x704C2]) != bytes.fromhex("70b5"):   # push {r4-r6, lr}
             raise RuntimeError("unexpected stock bytes at 0x704c0")

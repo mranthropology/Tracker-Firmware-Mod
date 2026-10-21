@@ -49,6 +49,7 @@ Song tests (m5–m7, m9–m12) expect a Tracker project copied to `projects/<nam
 | `m17_braids_templates.py [dir]` | Checks the 48 `BR-` template instruments: CRC, frame count, header, name/mode, and that each plays as its model through the patched firmware |
 | `m18_fx_bank.py [--quick]` | FX bank: plate vs stock reverb (level, decay vs Size, stereo, cost, idle, clearing), tape vs stock delay (echo times/levels, ping-pong, time-change glide, max feedback), the Shift + Master + button selector, and whole-engine renders (all-stock selection bit-identical to master_fx alone) |
 | `m19_fxbank_ptf_verify.py [ptf]` | Checks a `.ptf` with the FX bank: one gap-free block; every byte equals the tested image; vtables point at the bank; the decoded image booted with garbage SDRAM renders bit-identical to the harness |
+| `m20_cond_trigs.py` | Conditional trigs: each condition over 8 passes, another track, restart, ordinary Chance unchanged vs stock, FX max/text vs stock, project render bit-identical |
 | `m11_sdram_audit.py` | Watches every SDRAM access above the firmware's top object (`0x70ef8874`–`0x71000000`) over boot, load and playback; the patch state must be the only thing used there |
 | `m10_dj_control.py [--demo]` | DJ on Shift + Master + jog wheel with snap-back: input routing, audio, clicks; `--demo` plays the gesture over pattern 1 → `out/*_djcontrol.wav` |
 
@@ -233,7 +234,8 @@ Song tests (m5–m7, m9–m12) expect a Tracker project copied to `projects/<nam
 
 ### Braids instrument (`braids/`)
 
-- Build: `braids/build.sh <dir with eurorack/ and stmlib/>` compiles an unmodified
+- Build: `braids/build.sh <absolute dir with eurorack/ and stmlib/>` (the path
+  must not contain spaces; link it from a space-free path if needed) compiles an unmodified
   pichenettes/eurorack + stmlib checkout (MIT, Emilie Gillet) as one unit
   (`braids_unity.cc`; shim headers in `braids/shim/`). It links at `0xD9000`
   (110 KB). Writable data goes to SDRAM `0x70FE1000`, with its starting
@@ -395,12 +397,64 @@ Song tests (m5–m7, m9–m12) expect a Tracker project copied to `projects/<nam
     header (`0x70F20000`). Switching back to the stock reverb runs its reset,
     so no stale tail.
   - **Diagnostics:** each update is timed with the DWT cycle counter.
-    Pressing Shift + Master shows `R92 P140 D25 T27k`: reverb now, plate's
-    largest block since selected, delay now, tape's largest block (thousand
-    cycles; a block is ~522k). A guard puts an effect back on stock while it
+    Pressing Shift + Master shows `L45/60% R92 P140 D25 T27k`: L = the whole
+    audio block (average / peak over ~1 s, % of the 522,240-cycle budget), then
+    reverb now, plate's largest block since selected, delay now, tape's
+    largest block (thousand cycles). L times the firmware's per-block audio
+    service `0xf57c` (sequencer clock, voice update, then update_all
+    `0xce5d8`), which is reached only through the application callback table
+    at `0x9fcfc` (entry `0x9fd04`); make_ptf points that entry at
+    `block_service_timed` (idea from SIDTracker's render meter).
+  - **Flash probe:** at boot patch_boot counts the non-erased (not 0xFF)
+    bytes in 0xFC000–0xFFFFF, which no build writes (make_ptf refuses a patch
+    that reaches it). The first button press after boot shows
+    `Flash top 16K: blank` or `... N set`. SIDTracker/OpenTracker keep out of
+    all flash above the stock image (0xd6460) in case bootloader or identity
+    data lives there; this checks the most likely place. In the emulator,
+    stock never reads above 0xd6460 or FlexNVM during boot, load or playback.
+    **Hardware (2026-10-21):** `Flash top 16K: blank`, so nothing lives in the
+    top 16 KB of program flash. The total load readout (`L`) works on the device. A guard puts an effect back on stock while it
     stays over 150k (plate) or 80k (tape) cycles for 4 blocks (`!` in the
     readout); the next selector press clears it.
 - **Results (m18):** see FINDINGS.md §8.
+
+### Conditional trigs (`patch/master_fx.c`, `--hooks ...,ct`) — experimental
+
+Elektron-style trig conditions on the stock **Chance** FX (`C`, internal FX
+type 4). Chance 0–100 % works as before; scrolling past 100 gives:
+
+| Chance value | Shown | Plays on |
+|---|---|---|
+| 101 | `1:2` | passes 1, 3, 5, … |
+| 102 | `2:2` | passes 2, 4, 6, … |
+| 103 | `1:4` | passes 1, 5, 9, … |
+| 104 | `2:4` | passes 2, 6, 10, … |
+| 105 | `3:4` | passes 3, 7, 11, … |
+| 106 | `4:4` | passes 4, 8, 12, … |
+
+A pass is one time through that track's pattern; counting starts when
+playback starts. Idea and condition set from Tracker+ Conditional Trigs CT6
+([Psygoo/TrackerPlus-CT-Web](https://github.com/Psygoo/TrackerPlus-CT-Web),
+MIT), which is Tracker+ 1.2.0 code; nothing of it is used here, the 1.9.2
+hooks are this project's own.
+- **Chance roll** `0xcadda`: the stock code calls random `0xcba18(0, max)`
+  and skips the note if the result exceeds the value. The hook returns 0
+  (play) or 0x7fffffff (skip) for 101–106 and calls the stock random with
+  max 100 otherwise, so ordinary Chance is bit-identical to stock. The FX
+  slot is in r5 (value at +0x6c) and the track in sb.
+- **FX max** `0xcb750` (switch over FX types, default 100): Chance → 106.
+  Other users of the maximum (e.g. Random FX value) can now produce 101–106.
+- **Value text** `0x146a4(this, buf, size, type, value, mode)`: Chance
+  101–106 → `1:2` … `4:4`; everything else stock.
+- **Pass counter** `0x11ed8`: where a track's step index (sequencer
+  `0x1fff953c` + t×0x68 + 0x80) wraps to the loop start; per-track counts in
+  the patch state. **Reset** at playback start `0xc9230` (six callers:
+  pattern, song and other starts).
+- **Hardware (2026-10-21, `PolyendTracker_ct1.ptf`, "1.9.2 CT1"):** Chance
+  scrolls past 100 and the pattern grid shows the condition labels; conditions
+  alternate passes as expected; in song mode the pass count carries on across
+  patterns (a pattern change counts as a pass, it does not restart the count).
+  Not yet checked: the Performance screen.
 
 ### Playback
 

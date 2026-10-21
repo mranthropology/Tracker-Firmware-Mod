@@ -81,7 +81,7 @@ def indicator() -> bool:
     emu = boot("")
     log = emu.record_ui_passthrough()
     steps = [("press Shift, Master", lambda: (emu.press(BTN_SHIFT), emu.press(BTN_MASTER)),
-              ["R0 P0 D0 T0k"]),                      # FX bank cost readout (no DWT in the harness)
+              ["L0/0% R0 P0 D0 T0k"]),                      # FX bank cost readout (no DWT in the harness)
              ("jog -1", lambda: emu.turn(-1), ["DJ Low-pass 2%"]),
              ("jog -19", lambda: emu.turn(-19), ["DJ Low-pass 40%"]),
              ("jog -100 (clamps)", lambda: emu.turn(-100), ["DJ Low-pass 100%"]),
@@ -97,7 +97,7 @@ def indicator() -> bool:
         action()
         got = [e for e in log if e[0] == "popup"]
         log.clear()
-        good = [t for _, t, _ in got] == expect and all(sec == (2 if t.startswith("R0 P") else 1) for _, t, sec in got)
+        good = [t for _, t, _ in got] == expect and all(sec == (2 if t.startswith("L0/") else 1) for _, t, sec in got)
         ok &= good
         shown = ", ".join(f'"{t}" ({sec} s)' for _, t, sec in got) or "-"
         print(f"   {'ok ' if good else 'BAD'} {label:26s} {shown}")

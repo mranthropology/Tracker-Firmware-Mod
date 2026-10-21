@@ -259,7 +259,25 @@ built-in bank with a plate reverb and a tape delay.
   don't exist on the K66, so prebuilt units can't run. Units with source can
   be rebuilt against this bank's entry points.
 
-## 9. Next ideas
+## 9. Conditional trigs (`--hooks ...,ct`) — experimental
+
+Elektron-style trig conditions on the stock Chance FX: Chance 101–106 show as
+`1:2`, `2:2`, `1:4`, `2:4`, `3:4`, `4:4` and play on that pass of every 2 or 4
+passes of the track's pattern, counted from Play. Chance 0–100 is unchanged
+(the same random calls as stock, so renders are bit-identical). Five hooks:
+the Chance roll `0xcadda`, FX max `0xcb750`, value text `0x146a4`, step wrap
+`0x11ed8` and playback start `0xc9230` (details in README). Idea and
+condition set from Tracker+ Conditional Trigs CT6
+([Psygoo/TrackerPlus-CT-Web](https://github.com/Psygoo/TrackerPlus-CT-Web),
+MIT), which targets Tracker+ 1.2.0; no code from it is used.
+- **Emulator (m20):** every condition over 8 passes, another track, restart,
+  ordinary Chance vs stock, FX max and text vs stock, project render.
+- **Hardware (2026-10-21, "1.9.2 CT1"):** labels show and conditions work;
+  in song mode the count carries on across patterns. The same build's flash
+  probe reads `Flash top 16K: blank`, and its total-load readout works.
+- **Not checked yet:** the Performance screen; load numbers with plate + tape.
+
+## 10. Next ideas
 
 - **Momentary performance effects on Master + pads:** beat repeat, tape stop,
   bitcrush and filter sweeps.

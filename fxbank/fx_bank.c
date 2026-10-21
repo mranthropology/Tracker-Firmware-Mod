@@ -144,6 +144,7 @@ typedef struct {
     fx_meter_t rev;            /* +4  (master_fx.c reads avg +4, bank_max +24) */
     fx_meter_t dly;            /* +28 (avg +28, bank_max +48) */
     uint32_t guard;            /* +52 bit0 plate, bit1 tape switched off for CPU */
+    fx_meter_t load;           /* +56 whole audio block (avg +56, peak +60), see block_service_timed */
     uint32_t rev_mode;         /* MODE_* currently running */
     uint32_t dly_mode;
     uint32_t clear_pos;        /* plate lines zeroed so far (floats) */
@@ -164,7 +165,8 @@ typedef struct {
 _Static_assert(sizeof(fx_state_t) <= 0x1000, "state overlaps the plate lines");
 _Static_assert(SRAM_SAMPLES * 2 == 26624, "master_fx.c FX_SRAM_BYTES must match");
 _Static_assert(__builtin_offsetof(fx_state_t, rev) == 4 && __builtin_offsetof(fx_state_t, dly) == 28
-               && __builtin_offsetof(fx_state_t, guard) == 52, "master_fx.c reads these offsets");
+               && __builtin_offsetof(fx_state_t, guard) == 52 && __builtin_offsetof(fx_state_t, load) == 56,
+               "master_fx.c reads these offsets");
 
 #define DWT_CYCCNT      (*(volatile uint32_t *)0xE0001004u)
 #define BLOCK_CYCLES    522240u                 /* 180 MHz x 128 / 44117.6 Hz */
@@ -689,4 +691,25 @@ void delay_update(void *node)
     uint32_t t0 = DWT_CYCCNT;
     delay_work(s, node);
     meter(s, &s->dly, DWT_CYCCNT - t0, s->dly_mode == MODE_BANK, DLY_GUARD, SEL_STOCK_DELAY);
+}
+
+/* ---------- whole-block audio load ----------
+ *
+ * The firmware's per-block audio service 0xf57c (sequencer clock 0xcb640,
+ * voice update 0xcbad0, then the scheduler 0xcbbdc -> AudioStream update_all
+ * 0xce5d8) is reached only through the application callback table at
+ * 0x9fcfc (setup 0xf25d, ..., this at 0x9fd04). make_ptf points that word
+ * here: time the whole service with the DWT cycle counter. Wall time, so it
+ * includes any higher-priority interrupt that preempts it (as SIDTracker's
+ * render meter does). master_fx.c shows it as a percentage of BLOCK_CYCLES.
+ */
+#define FW_BLOCK_SERVICE 0x0000F57Du
+typedef void (*service_fn)(void *self, uint32_t a, uint32_t b, uint32_t c);
+
+void block_service_timed(void *self, uint32_t a, uint32_t b, uint32_t c)
+{
+    uint32_t t0 = DWT_CYCCNT;
+    ((service_fn)FW_BLOCK_SERVICE)(self, a, b, c);
+    fx_state_t *s = state();
+    meter(s, &s->load, DWT_CYCCNT - t0, 0, 0, 0);
 }

@@ -352,7 +352,7 @@ def ui_tests():
     start = emu.r32(PATCH_STATE + 20)
     emu.press(BTN_SHIFT); emu.press(BTN_MASTER)
     cpu = [e[1] for e in log if e[0] == "popup"]
-    good = start == 3 and len(cpu) == 1 and cpu[0].startswith("R0 P0")
+    good = start == 3 and len(cpu) == 1 and cpu[0].startswith("L0/0% R0 P0")
     ok &= good
     print(f"   {'ok ' if good else 'BAD'} boots on all stock (select {start}); Shift + Master shows the "
           f"cost readout {cpu}")
@@ -370,6 +370,34 @@ def ui_tests():
     good = buttons == [(BTN_SHIFT, 1), (BTN_MASTER, 1), (BTN_MASTER, 0), (BTN_SHIFT, 0), (14, 1), (14, 0)]
     ok &= good
     print(f"   {'ok ' if good else 'BAD'} forwarded buttons {buttons} (14 swallowed only during the gesture)")
+    return ok
+
+
+def diag_tests():
+    print("5. diagnostics: whole-block load wrapper, flash probe")
+    ok = True
+    emu = boot(project=False)
+    calls = []
+    emu.override(0xF57C, lambda e: calls.append(tuple(e.args(4))))
+    target = emu.r32(0x9FD04)
+    emu.call(target, 0x11, 0x22, 0x33, 0x44)
+    good = target == emu.fxbank_syms["block_service_timed"] and calls == [(0x11, 0x22, 0x33, 0x44)]
+    ok &= good
+    print(f"   {'ok ' if good else 'BAD'} app table 0x9fd04 -> block_service_timed {target:#x}, "
+          f"which calls the stock service 0xf57c with the same arguments {calls}")
+    emu = boot(project=False)
+    probe = emu.r32(PATCH_STATE + 32)
+    flash = bytes(emu.uc.mem_read(0xFC000, 0x4000))
+    expect = sum(b != 0xFF for b in flash)
+    good = probe >> 31 and (probe & 0xFFFF) == min(expect, 0xFFFF)
+    ok &= good
+    log = emu.record_ui_passthrough(skip_probe=False)
+    emu.press(14); emu.release(14); emu.press(14); emu.release(14)
+    pops = [e[1] for e in log if e[0] == "popup"]
+    good2 = len(pops) == 1 and pops[0].startswith("Flash top 16K: ")
+    ok &= good2
+    print(f"   {'ok ' if good and good2 else 'BAD'} boot probe counts {probe & 0xFFFF} non-0xFF bytes "
+          f"in 0xFC000-0xFFFFF (emulator flash: {expect}); shown once: {pops}")
     return ok
 
 
@@ -409,6 +437,7 @@ def main():
     ok &= ui_tests()
     ok &= reverb_tests()
     ok &= delay_tests()
+    ok &= diag_tests()
     ok &= engine_tests()
     print("all ok" if ok else "FAILURES")
     sys.exit(0 if ok else 1)
